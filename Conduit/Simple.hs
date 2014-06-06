@@ -9,33 +9,35 @@
 
 module Conduit.Simple where
 
-import Control.Exception.Lifted
-import Control.Monad hiding (mapM)
-import Control.Monad.Base
-import Control.Monad.Catch hiding (bracket)
-import Control.Monad.IO.Class
-import Control.Monad.Primitive
-import Control.Monad.Trans.Class
-import Control.Monad.Trans.Control
-import Control.Monad.Trans.Either
-import Data.Bifunctor
-import Data.Builder
-import Data.ByteString
+import           Control.Exception.Lifted
+import           Control.Monad hiding (mapM)
+import           Control.Monad.Base
+import           Control.Monad.Catch hiding (bracket)
+import           Control.Monad.IO.Class
+import           Control.Monad.Primitive
+import           Control.Monad.Trans.Class
+import           Control.Monad.Trans.Control
+import           Control.Monad.Trans.Either
+import           Data.Bifunctor
+import           Data.Builder
+import           Data.ByteString
 -- import Data.Foldable
-import Data.IOData
-import Data.MonoTraversable
-import Data.Monoid
-import Data.NonNull
-import Data.Sequences
-import Data.Sequences.Lazy
-import Data.Text
-import Data.Textual.Encoding
-import Data.Traversable
-import Data.Vector.Generic hiding (mapM)
-import Data.Word
-import Prelude hiding (mapM)
-import System.IO
-import System.Random.MWC
+import           Data.IOData
+import           Data.MonoTraversable
+import           Data.Monoid
+import           Data.NonNull
+import           Data.Sequences
+import           Data.Sequences.Lazy
+import qualified Data.Streaming.Filesystem as F
+import           Data.Text
+import           Data.Textual.Encoding
+import           Data.Traversable
+import           Data.Vector.Generic hiding (mapM)
+import           Data.Word
+import           Prelude hiding (mapM)
+import           System.FilePath ((</>))
+import           System.IO
+import           System.Random.MWC
 
 type Source m a    = forall r. r -> (a -> r -> EitherT r m r) -> EitherT r m r
 type Conduit a m b = Source m a -> Source m b
@@ -167,8 +169,21 @@ sourceRandomNGen :: (Variate a, MonadBase base m, PrimMonad base)
                  => Gen (PrimState base) -> Int -> Source m a
 sourceRandomNGen = undefined
 
-sourceDirectory :: MonadIO m => FilePath -> Source m FilePath
-sourceDirectory = undefined
+sourceDirectory :: (MonadBaseControl IO m, MonadIO m)
+                => FilePath -> Source m FilePath
+sourceDirectory dir z yield =
+    bracket
+        (liftIO (F.openDirStream dir))
+        (liftIO . F.closeDirStream)
+        (go z)
+  where
+    go y ds = loop y
+      where
+        loop y' = do
+            mfp <- liftIO $ F.readDirStream ds
+            case mfp of
+                Nothing -> return y'
+                Just fp -> loop =<< yield (dir </> fp) y'
 
 sourceDirectoryDeep :: MonadIO m => Bool -> FilePath -> Source m FilePath
 sourceDirectoryDeep = undefined

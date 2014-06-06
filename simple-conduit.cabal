@@ -28,6 +28,11 @@ Library
                      , bifunctors
                      , chunked-data
                      , mono-traversable
+                     , vector
+                     , mwc-random
+                     , bytestring
+                     , text
+                     , primitive
   ghc-options:     -Wall
 
 benchmark bench

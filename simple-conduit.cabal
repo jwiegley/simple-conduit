@@ -1,0 +1,46 @@
+Name:                simple-conduit
+Version:             0.0.1
+Synopsis:            Streaming data processing library.
+Description:
+    @simple-conduit@ follows a similar UI to the more capable @conduit@ library, but reduces the scope of what it can solve donw to what can be expressed by chaining monadic folds that allow for early termination.  This allows for more predictable resource management behavior, at the cost of not allowing scenarios that @conduit@ is better designed.
+License:             BSD3
+License-file:        LICENSE
+Author:              John Wiegley
+Maintainer:          johnw@newartisans.com
+Category:            Data, Conduit
+Build-type:          Simple
+Cabal-version:       >=1.8
+Homepage:            http://github.com/jwiegley/simple-conduit
+
+Library
+  Exposed-modules:     Conduit.Simple
+  Build-depends:       base                     >= 4.3          && < 5
+                     , exceptions
+                     , lifted-base              >= 0.1
+                     , transformers-base        >= 0.4.1        && < 0.5
+                     , monad-control            >= 0.3.1        && < 0.4
+                     , containers
+                     , transformers             >= 0.2.2        && < 0.5
+                     , mtl
+                     , void                     >= 0.5.5
+                     , mmorph
+  ghc-options:     -Wall
+
+test-suite test
+    hs-source-dirs: test
+    main-is: main.hs
+    type: exitcode-stdio-1.0
+    cpp-options:   -DTEST
+    build-depends:   simple-conduit
+                   , base
+                   , hspec >= 1.3
+                   , QuickCheck
+                   , transformers
+                   , mtl
+                   , void
+                   , containers
+    ghc-options:     -Wall
+
+source-repository head
+  type:     git
+  location: git://github.com/jwiegley/simple-conduit.git

@@ -24,11 +24,15 @@ Library
                      , mtl
                      , void                     >= 0.5.5
                      , mmorph
+                     , either
+                     , bifunctors
+                     , chunked-data
+                     , mono-traversable
   ghc-options:     -Wall
 
-test-suite test
+benchmark bench
     hs-source-dirs: test
-    main-is: main.hs
+    main-is: bench.hs
     type: exitcode-stdio-1.0
     cpp-options:   -DTEST
     build-depends:   simple-conduit
@@ -39,6 +43,11 @@ test-suite test
                    , mtl
                    , void
                    , containers
+                   , text
+                   , criterion
+                   , conduit
+                   , conduit-extra
+                   , conduit-combinators
     ghc-options:     -Wall
 
 source-repository head

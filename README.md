@@ -9,7 +9,10 @@ Features conspicuously lacking:
 
 Features surprisingly present:
 
-    - Performance within 20% of conduit in simple cases
+    - Much simpler types; Void is no longer needed, for example
+    - No special operators are needed; conduit pipelines can be expressed
+      using only function application ($)
+    - Performance beats conduit in simple cases (162ms vs. 239ms)
     - Early termination by consumers
     - Notification of uptream termination
     - Not a continuation, so monad-control can be used for resource control

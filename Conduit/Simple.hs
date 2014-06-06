@@ -117,7 +117,7 @@ sourceLazy = yieldMany . toChunks
 {-# INLINE sourceLazy #-}
 
 repeatMC :: Monad m => m a -> Source m a
-repeatMC = undefined
+repeatMC x z yield = go z where go y = go =<< flip yield y =<< lift x
 
 repeatWhileMC :: Monad m => m a -> (a -> Bool) -> Source m a
 repeatWhileMC = undefined
@@ -125,28 +125,33 @@ repeatWhileMC = undefined
 replicateMC :: Monad m => Int -> m a -> Source m a
 replicateMC = undefined
 
+sourceHandle :: (MonadIO m, IOData a) => Handle -> Source m a
+sourceHandle h z yield = go z
+  where
+    go y = do
+        x <- liftIO $ hGetChunk h
+        if onull x
+            then return y
+            else go =<< yield x y
+
 sourceFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
            => FilePath -> Source m a
 sourceFile path z yield =
     bracket
         (liftIO $ openFile path ReadMode)
         (liftIO . hClose)
-        (go z)
-  where
-    go y h = do
-        x <- liftIO $ hGetChunk h
-        if onull x
-            then return y
-            else flip go h =<< yield x y
+        (\h -> sourceHandle h z yield)
 
-sourceHandle :: (MonadIO m, IOData a) => Handle -> Source m a
-sourceHandle = undefined
+sourceIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
+               => IO Handle -> Source m a
+sourceIOHandle f z yield =
+    bracket
+        (liftIO f)
+        (liftIO . hClose)
+        (\h -> sourceHandle h z yield)
 
-sourceIOHandle :: (MonadIO m, IOData a) => IO Handle -> Source m a
-sourceIOHandle = undefined
-
-stdinC :: (MonadIO m, IOData a) => Source m a
-stdinC = undefined
+stdinC :: (MonadBaseControl IO m, MonadIO m, IOData a) => Source m a
+stdinC = sourceHandle stdin
 
 sourceRandom :: (Variate a, MonadIO m) => Source m a
 sourceRandom = undefined

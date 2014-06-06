@@ -9,33 +9,35 @@
 
 module Conduit.Simple where
 
-import Control.Exception.Lifted
-import Control.Monad hiding (mapM)
-import Control.Monad.Base
-import Control.Monad.Catch hiding (bracket)
-import Control.Monad.IO.Class
-import Control.Monad.Primitive
-import Control.Monad.Trans.Class
-import Control.Monad.Trans.Control
-import Control.Monad.Trans.Either
-import Data.Bifunctor
-import Data.Builder
-import Data.ByteString
+import           Control.Exception.Lifted
+import           Control.Monad hiding (mapM)
+import           Control.Monad.Base
+import           Control.Monad.Catch hiding (bracket)
+import           Control.Monad.IO.Class
+import           Control.Monad.Primitive
+import           Control.Monad.Trans.Class
+import           Control.Monad.Trans.Control
+import           Control.Monad.Trans.Either
+import           Data.Bifunctor
+import           Data.Builder
+import           Data.ByteString
 -- import Data.Foldable
-import Data.IOData
-import Data.MonoTraversable
-import Data.Monoid
-import Data.NonNull
-import Data.Sequences
-import Data.Sequences.Lazy
-import Data.Text
-import Data.Textual.Encoding
-import Data.Traversable
-import Data.Vector.Generic hiding (mapM)
-import Data.Word
-import Prelude hiding (mapM)
-import System.IO
-import System.Random.MWC
+import           Data.IOData
+import           Data.MonoTraversable
+import           Data.Monoid
+import           Data.NonNull
+import           Data.Sequences
+import           Data.Sequences.Lazy
+import qualified Data.Streaming.Filesystem as F
+import           Data.Text
+import           Data.Textual.Encoding
+import           Data.Traversable
+import           Data.Vector.Generic hiding (mapM)
+import           Data.Word
+import           Prelude hiding (mapM)
+import           System.FilePath ((</>))
+import           System.IO
+import           System.Random.MWC
 
 -- | r is "resource", a is the incremental component of the stream
 --   should remind the reader of foldM
@@ -122,7 +124,7 @@ sourceLazy = yieldMany . toChunks
 {-# INLINE sourceLazy #-}
 
 repeatMC :: Monad m => m a -> Source m a
-repeatMC = undefined
+repeatMC x z yield = go z where go y = go =<< flip yield y =<< lift x
 
 repeatWhileMC :: Monad m => m a -> (a -> Bool) -> Source m a
 repeatWhileMC = undefined
@@ -130,28 +132,33 @@ repeatWhileMC = undefined
 replicateMC :: Monad m => Int -> m a -> Source m a
 replicateMC = undefined
 
+sourceHandle :: (MonadIO m, IOData a) => Handle -> Source m a
+sourceHandle h z yield = go z
+  where
+    go y = do
+        x <- liftIO $ hGetChunk h
+        if onull x
+            then return y
+            else go =<< yield x y
+
 sourceFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
            => FilePath -> Source m a
 sourceFile path z yield =
     bracket
         (liftIO $ openFile path ReadMode)
         (liftIO . hClose)
-        (go z)
-  where
-    go y h = do
-        x <- liftIO $ hGetChunk h
-        if onull x
-            then return y
-            else flip go h =<< yield x y
+        (\h -> sourceHandle h z yield)
 
-sourceHandle :: (MonadIO m, IOData a) => Handle -> Source m a
-sourceHandle = undefined
+sourceIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
+               => IO Handle -> Source m a
+sourceIOHandle f z yield =
+    bracket
+        (liftIO f)
+        (liftIO . hClose)
+        (\h -> sourceHandle h z yield)
 
-sourceIOHandle :: (MonadIO m, IOData a) => IO Handle -> Source m a
-sourceIOHandle = undefined
-
-stdinC :: (MonadIO m, IOData a) => Source m a
-stdinC = undefined
+stdinC :: (MonadBaseControl IO m, MonadIO m, IOData a) => Source m a
+stdinC = sourceHandle stdin
 
 sourceRandom :: (Variate a, MonadIO m) => Source m a
 sourceRandom = undefined
@@ -167,8 +174,21 @@ sourceRandomNGen :: (Variate a, MonadBase base m, PrimMonad base)
                  => Gen (PrimState base) -> Int -> Source m a
 sourceRandomNGen = undefined
 
-sourceDirectory :: MonadIO m => FilePath -> Source m FilePath
-sourceDirectory = undefined
+sourceDirectory :: (MonadBaseControl IO m, MonadIO m)
+                => FilePath -> Source m FilePath
+sourceDirectory dir z yield =
+    bracket
+        (liftIO (F.openDirStream dir))
+        (liftIO . F.closeDirStream)
+        (go z)
+  where
+    go y ds = loop y
+      where
+        loop y' = do
+            mfp <- liftIO $ F.readDirStream ds
+            case mfp of
+                Nothing -> return y'
+                Just fp -> loop =<< yield (dir </> fp) y'
 
 sourceDirectoryDeep :: MonadIO m => Bool -> FilePath -> Source m FilePath
 sourceDirectoryDeep = undefined

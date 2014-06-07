@@ -9,6 +9,7 @@
 
 module Conduit.Simple where
 
+import           Control.Applicative
 import           Control.Exception.Lifted
 import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
@@ -111,6 +112,10 @@ resolve await z f = either id id `liftM` runEitherT (await z f)
 yieldMany :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)
 yieldMany xs z yield = ofoldlM yield z xs
 {-# INLINE yieldMany #-}
+
+yieldOne :: Monad m => a -> Source m a
+yieldOne x z yield = yield z x
+{-# INLINE yieldOne #-}
 
 unfoldC :: Monad m => (b -> Maybe (a, b)) -> b -> Source m a
 unfoldC f i z yield = go i z
@@ -708,3 +713,30 @@ linesUnboundedC = linesUnboundedC_ '\n'
 linesUnboundedAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
                      => Conduit seq m seq
 linesUnboundedAsciiC = linesUnboundedC_ 10
+
+-- | The use of 'awaitForever' in this library is just a bit different from
+--   conduit:
+--
+-- >>> awaitForever $ \x yield skip -> if even x then yield x else skip
+awaitForever :: Monad m
+             => (forall r. a -> (b -> EitherT r m r) -> EitherT r m r
+                 -> EitherT r m r)
+             -> Conduit a m b
+awaitForever f await z yield =
+    await z $ \r x -> f x (yield r) (return r)
+
+zipSourceApp :: Monad m => Source m (x -> y) -> Source m x -> Source m y
+zipSourceApp f arg z yield = f z $ \r x -> arg r $ \_ y -> yield z (x y)
+
+newtype ZipSource m r = ZipSource { getZipSource :: Source m r }
+
+instance Monad m => Functor (ZipSource m) where
+    fmap f (ZipSource p) = ZipSource $ \z yield -> p z $ \r x -> yield r (f x)
+
+instance Monad m => Applicative (ZipSource m) where
+    pure x = ZipSource $ yieldOne x
+    ZipSource l <*> ZipSource r = ZipSource (zipSourceApp l r)
+
+-- {-# LANGUAGE ImpredicativeTypes #-}
+-- sequenceSources :: (Traversable f, Monad m) => f (Source m r) -> Source m (f r)
+-- sequenceSources = getZipSource . sequenceA . fmap ZipSource

@@ -914,3 +914,23 @@ sourceTBQueue chan z yield = go z
         if mt
             then return r'
             else go r'
+
+untilMC :: Monad m => m a -> m Bool -> Source m a r
+untilMC m f z yield = go z
+  where
+    go r = do
+        x <- lift m
+        r' <- yield r x
+        cont <- lift f
+        if cont
+            then go r'
+            else return r'
+
+whileMC :: Monad m => m Bool -> m a -> Source m a r
+whileMC f m z yield = go z
+  where
+    go r = do
+        cont <- lift f
+        if cont
+            then lift m >>= yield r >>= go
+            else return r

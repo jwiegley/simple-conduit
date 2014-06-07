@@ -90,15 +90,6 @@ infixr 0 $$
 ($$) = flip ($)
 {-# INLINE ($$) #-}
 
--- | Since Sources are not Monads in this library (as they are in the full
---   conduit library), they can be sequentially "chained" using this append
---   operator.  If Source were a newtype, we could make it an instance of
---   Monoid.
-infixr 3 <+>
-(<+>) :: Monad m => Source m a r -> Conduit a m a r
-x <+> y = \r f -> flip y f =<< x r f
-{-# INLINE (<+>) #-}
-
 -- | This is just like 'Control.Monad.Trans.Either.bimapEitherT', but it only
 --   requires a 'Monad' constraint rather than 'Functor'.
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
@@ -759,14 +750,22 @@ instance Monad m => Applicative (ZipSource m r) where
     pure x = ZipSource $ yieldOne x
     ZipSource l <*> ZipSource r = ZipSource (zipSourceApp l r)
 
--- | Sequence a collection of sources, feeding them all the same input and
---   yielding a collection of their results.
+-- | Sequence a collection of sources.
 --
 -- >>> sinkList $ sequenceSources [yieldOne 1, yieldOne 2, yieldOne 3]
 -- [[1,2,3]]
 sequenceSources :: (Traversable f, Monad m)
                 => f (Source m a r) -> Source m (f a) r
 sequenceSources = getZipSource . sequenceA . fmap ZipSource
+
+-- | Since Sources are not Monads in this library (as they are in the full
+--   conduit library), they can be sequentially "chained" using this append
+--   operator.  If Source were a newtype, we could make it an instance of
+--   Monoid.
+infixr 3 <+>
+(<+>) :: Monad m => Source m a r -> Conduit a m a r
+x <+> y = \r f -> flip y f =<< x r f
+{-# INLINE (<+>) #-}
 
 instance MFunctor (EitherT s) where
   hoist f (EitherT m) = EitherT $ f m
@@ -815,18 +814,43 @@ instance Monad m => Functor (ZipSink i m r) where
 
 instance Monad m => Applicative (ZipSink i m r) where
     pure x = ZipSink $ \_ -> return x
-    ZipSink f <*> ZipSink x =
-         ZipSink $ \await -> f await `ap` x await
+    ZipSink f <*> ZipSink x = ZipSink $ \await -> f await `ap` x await
 
 -- | Send incoming values to all of the @Sink@ providing, and ultimately
--- coalesce together all return values.
+--   coalesce together all return values.
 --
 -- Implemented on top of @ZipSink@, see that data type for more details.
---
--- Since 1.0.13
 sequenceSinks :: (Traversable f, Monad m)
               => f (Source m i r -> m s) -> Source m i r -> m (f s)
 sequenceSinks = getZipSink . sequenceA . fmap ZipSink
+
+-- infixr 3 <*>
+-- (<*>) :: Monad m
+--       => (Source (StateT (r', s) m) i s  -> StateT (r', s) m r)
+--       -> (Source (StateT (r', s) m) i s' -> StateT (r', s) m r')
+--       -> Source m i (s, s') -> m (r, r')
+-- (<*>) = zipSinks
+-- {-# INLINE (<*>) #-}
+
+-- zipConduitApp :: Monad m => Conduit a m (x -> y) r -> Conduit a m x r -> Conduit a m y r
+-- zipConduitApp f arg z yield = f z $ \r x -> arg r $ \_ y -> yield z (x y)
+
+-- newtype ZipConduit a m r b = ZipConduit { getZipConduit :: Conduit a m b r }
+
+-- instance Monad m => Functor (ZipConduit a m r) where
+--     fmap f (ZipConduit p) = ZipConduit $ \z yield -> p z $ \r x -> yield r (f x)
+
+-- instance Monad m => Applicative (ZipConduit a m r) where
+--     pure x = ZipConduit $ yieldOne x
+--     ZipConduit l <*> ZipConduit r = ZipConduit (zipConduitApp l r)
+
+-- -- | Sequence a collection of sources.
+-- --
+-- -- >>> sinkList $ sequenceConduits [yieldOne 1, yieldOne 2, yieldOne 3]
+-- -- [[1,2,3]]
+-- sequenceConduits :: (Traversable f, Monad m)
+--                 => f (Conduit a m b r) -> Conduit a m (f b) r
+-- sequenceConduits = getZipConduit . sequenceA . fmap ZipConduit
 
 asyncC :: (MonadBaseControl IO m, Monad m)
        => (a -> m b) -> Conduit a m (Async (StM m b)) r

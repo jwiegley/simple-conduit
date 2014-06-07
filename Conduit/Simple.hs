@@ -24,9 +24,10 @@ import           Control.Monad.Primitive
 import           Control.Monad.Trans.Class
 import           Control.Monad.Trans.Control
 import           Control.Monad.Trans.Either
+import           Control.Monad.Trans.State
 import           Data.Bifunctor
 import           Data.Builder
-import           Data.ByteString hiding (hPut)
+import           Data.ByteString hiding (hPut, putStrLn)
 import           Data.IOData
 import           Data.MonoTraversable
 import           Data.Monoid
@@ -767,11 +768,27 @@ sequenceSources :: (Traversable f, Monad m)
 sequenceSources = getZipSource . sequenceA . fmap ZipSource
 
 zipSinks :: Monad m
-         => (Source m i rs  -> m r)
-         -> (Source m i rs' -> m r')
-         -> (forall s. Source m i s)
+         => (Source (StateT (r', s) m) i s  -> StateT (r', s) m r)
+         -> (Source (StateT (r', s) m) i s' -> StateT (r', s) m r')
+         -> (forall t. Source (StateT (r', s) m) i t)
          -> m (r, r')
-zipSinks x y await = liftM2 (,) (x await) (y await)
+zipSinks x y await = do
+    let i = (error "accessing r", error "accessing r'")
+    flip evalStateT i $ do
+        r <- x $ \rx yieldx -> do
+            r' <- lift $ y $ \ry yieldy -> EitherT $ do
+                    eres <- runEitherT $ await (rx, ry) $ \(rx', ry') u -> do
+                        x' <- rewrap (, ry') $ yieldx rx' u
+                        y' <- rewrap (rx' ,) $ yieldy ry' u
+                        return (fst x', snd y')
+                    let (s, s') = either id id eres
+                    modify (\(b, _) -> (b, s))
+                    return $ Right s'
+            lift $ do
+                modify (\(_, b) -> (r', b))
+                gets snd
+        r' <- gets fst
+        return (r, r')
 
 newtype ZipSink i m r s = ZipSink { getZipSink :: Source m i r -> m s }
 

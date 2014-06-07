@@ -22,6 +22,7 @@ Library
                      , either
                      , exceptions
                      , filepath
+                     , lifted-async
                      , lifted-base              >= 0.1
                      , mmorph
                      , monad-control            >= 0.3.1        && < 0.4

@@ -26,24 +26,29 @@ import           Data.IOData
 import           Data.MonoTraversable
 import           Data.Monoid
 import           Data.NonNull as NonNull
+import qualified Data.Sequence as Sequence
 import           Data.Sequences as Seq
 import           Data.Sequences.Lazy
 import qualified Data.Streaming.Filesystem as F
 import           Data.Text
 import           Data.Textual.Encoding
 import           Data.Traversable
-import           Data.Vector.Generic hiding (mapM, foldM)
+import           Data.Vector.Generic hiding (mapM, foldM, modify)
 import           Data.Word
 import           Prelude hiding (mapM)
 import           System.FilePath ((</>))
 import           System.IO
 import           System.Random.MWC as MWC
 
--- | r is "resource", a is the incremental component of the stream
---   should remind the reader of foldM
---   Monad m => (a -> b -> m a) -> a -> [b] -> m a
---   Either is to signal short-circuiting and trigger finalization via Left.
---   EitherT r m r -- Left Monad Right
+-- | In the type variable below, r stands for "result", with much the same
+--   meaning as you find in 'ContT'.  a is the type of each element in the
+--   "stream".  The type of Source should recall 'foldM':
+--
+-- @
+-- Monad m => (a -> b -> m a) -> a -> [b] -> m a
+-- @
+--
+-- 'EitherT' is used to signal short-circuiting of the pipeline.
 type Source m a    = forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r
 type Conduit a m b = Source m a -> Source m b
 type Sink a m r    = Source m a -> m r
@@ -374,6 +379,31 @@ awaitNonNull await z yield = await z $ \r x ->
 
 headCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 headCE = undefined
+
+-- newtype Pipe a m b = Pipe { runPipe :: Sink a m b }
+
+-- instance Monad m => Functor (Pipe a m) where
+--     fmap f (Pipe p) = Pipe $ liftM f . p
+
+-- instance Monad m => Monad (Pipe a m) where
+--     return x = Pipe $ \_ -> return x
+--     Pipe p >>= f = Pipe $ \await -> do
+--         x <- p await
+--         runPipe (f x) await
+
+-- dropC' :: Monad m => Int -> Sink a m ()
+-- dropC' n await = rewrap snd $ await n go
+--   where
+--     go (n', r) _ | n' > 0 = return (n' - 1, r)
+--     go (_, r) x = rewrap (0,) $ yield r x
+
+-- test :: IO [Int]
+-- test = flip runPipe (yieldMany [1..10]) $ do
+--     Pipe $ dropC' 2
+--     Pipe sinkList
+
+-- leftover :: Monad m => a -> ResumableSource m a
+-- leftover l z _ = lift (modify (Sequence.|> l)) >> return z
 
 -- jww (2014-06-07): These two cannot be implemented without leftover support.
 -- peekC :: Monad m => Sink a m (Maybe a)

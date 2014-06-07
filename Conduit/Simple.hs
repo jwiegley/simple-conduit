@@ -26,7 +26,6 @@ import           Data.IOData
 import           Data.MonoTraversable
 import           Data.Monoid
 import           Data.NonNull as NonNull
-import qualified Data.Sequence as Sequence
 import           Data.Sequences as Seq
 import           Data.Sequences.Lazy
 import qualified Data.Streaming.Filesystem as F
@@ -98,6 +97,12 @@ x <+> y = \r f -> flip y f =<< x r f
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
 rewrap f k = EitherT $ bimap f f `liftM` runEitherT k
 {-# INLINE rewrap #-}
+
+rewrapM :: Monad m => (a -> EitherT b m b) -> EitherT a m a -> EitherT b m b
+rewrapM f k = EitherT $ do
+    eres <- runEitherT k
+    runEitherT $ either f f eres
+{-# INLINE rewrapM #-}
 
 resolve :: Monad m => (r -> a -> EitherT r m r) -> r -> a -> m r
 resolve await z f = either id id `liftM` runEitherT (await z f)
@@ -676,10 +681,30 @@ unlinesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
               => Conduit seq m seq
 unlinesAsciiC = undefined
 
+linesUnboundedC_ :: (Monad m, IsSequence seq, Eq (Element seq))
+                 => Element seq -> Conduit seq m seq
+linesUnboundedC_ sep await z yield = EitherT $ do
+    eres <- runEitherT $ await (z, n) go
+    case eres of
+        Left (r, _)  -> return $ Left r
+        Right (r, t)
+            | onull t   -> return $ Right r
+            | otherwise -> runEitherT $ yield r t
+  where
+    n = Seq.fromList []
+
+    go (r, t') t
+        | onull y = return (r, t <> t')
+        | otherwise = do
+            r' <- rewrap (, n) $ yield r (t' <> x)
+            go r' (Seq.drop 1 y)
+      where
+        (x, y) = Seq.break (== sep) t
+
 linesUnboundedC :: (Monad m, IsSequence seq, Element seq ~ Char)
                 => Conduit seq m seq
-linesUnboundedC = undefined
+linesUnboundedC = linesUnboundedC_ '\n'
 
 linesUnboundedAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
                      => Conduit seq m seq
-linesUnboundedAsciiC = undefined
+linesUnboundedAsciiC = linesUnboundedC_ 10

@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -761,10 +762,36 @@ instance Monad m => Applicative (ZipSource m r) where
 --
 -- >>> sinkList $ sequenceSources [yieldOne 1, yieldOne 2, yieldOne 3]
 -- [[1,2,3]]
-
 sequenceSources :: (Traversable f, Monad m)
                 => f (Source m a r) -> Source m (f a) r
 sequenceSources = getZipSource . sequenceA . fmap ZipSource
+
+zipSinks :: Monad m
+         => (Source m i rs  -> m r)
+         -> (Source m i rs' -> m r')
+         -> (forall s. Source m i s)
+         -> m (r, r')
+zipSinks x y await = liftM2 (,) (x await) (y await)
+
+newtype ZipSink i m r s = ZipSink { getZipSink :: Source m i r -> m s }
+
+instance Monad m => Functor (ZipSink i m r) where
+    fmap f (ZipSink k) = ZipSink $ liftM f . k
+
+instance Monad m => Applicative (ZipSink i m r) where
+    pure x = ZipSink $ \_ -> return x
+    ZipSink f <*> ZipSink x =
+         ZipSink $ \await -> f await `ap` x await
+
+-- | Send incoming values to all of the @Sink@ providing, and ultimately
+-- coalesce together all return values.
+--
+-- Implemented on top of @ZipSink@, see that data type for more details.
+--
+-- Since 1.0.13
+sequenceSinks :: (Traversable f, Monad m)
+              => f (Source m i r -> m s) -> Source m i r -> m (f s)
+sequenceSinks = getZipSink . sequenceA . fmap ZipSink
 
 asyncC :: (MonadBaseControl IO m, Monad m)
        => (a -> m b) -> Conduit a m (Async (StM m b)) r

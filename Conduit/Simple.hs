@@ -1,5 +1,4 @@
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE FlexibleContexts #-}
 
@@ -9,6 +8,7 @@
 
 module Conduit.Simple where
 
+import           Control.Applicative
 import           Control.Concurrent.Async.Lifted
 import           Control.Exception.Lifted
 import           Control.Monad hiding (mapM)
@@ -65,22 +65,22 @@ returnC f z yield = yield z =<< lift f
 --   is just flipped function application, so ($) can be used to achieve the
 --   same thing.
 infixl 1 $=
-($=) :: Monad m => Source m a r -> Conduit a m b r -> Source m b r
-l $= r = r l
+($=) :: a -> (a -> b) -> b
+($=) = flip ($)
 {-# INLINE ($=) #-}
 
 -- | Compose a 'Conduit' and a 'Sink' into a new 'Sink'.  Note that this is
 --   just function composition, so (.) can be used to achieve the same thing.
 infixr 2 =$
-(=$) :: Monad m => Conduit a m b r -> Sink b m r -> Sink a m r
-l =$ r = r . l
+(=$) :: (a -> b) -> (b -> c) -> a -> c
+(=$) = flip (.)
 {-# INLINE (=$) #-}
 
 -- | Compose a 'Source' and a 'Sink' and compute the result.  Note that this
 --   is just flipped function application, so ($) can be used to achieve the
 --   same thing.
 infixr 0 $$
-($$) :: Monad m => Source m a r -> Sink a m r -> m r
+($$) :: a -> (a -> b) -> b
 ($$) = flip ($)
 {-# INLINE ($$) #-}
 
@@ -89,7 +89,7 @@ infixr 0 $$
 --   operator.  If Source were a newtype, we could make it an instance of
 --   Monoid.
 infixr 3 <+>
-(<+>) :: Monad m => Source m a r -> Source m a r -> Source m a r
+(<+>) :: Monad m => Source m a r -> Conduit a m a r
 x <+> y = \r f -> flip y f =<< x r f
 {-# INLINE (<+>) #-}
 
@@ -279,7 +279,9 @@ dropWhileC f await z yield = rewrap snd $ await (f, z) go
     go (k, r) x | k x = return (k, r)
     go (_, r) x = rewrap (const False,) $ yield r x
 
-dropWhileCE :: (Monad m, IsSequence seq) => (Element seq -> Bool) -> Source m seq (Element seq -> Bool, r) -> Source m seq r
+dropWhileCE :: (Monad m, IsSequence seq)
+            => (Element seq -> Bool) -> Source m seq (Element seq -> Bool, r)
+            -> Source m seq r
 dropWhileCE f await z yield = rewrap snd $ await (f, z) go
   where
     go  (k, r) s
@@ -356,8 +358,9 @@ produceList f await =
         resolve await id (\front x -> front `seq` return (front . (x:)))
 {-# INLINE produceList #-}
 
--- sinkLazy :: (Monad m, LazySequence lazy strict) => Source m strict ([lazy] -> [lazy]) -> m lazy
--- sinkLazy = produceList fromChunks
+sinkLazy :: (Monad m, LazySequence lazy strict)
+         => Source m strict ([strict] -> [strict]) -> m lazy
+sinkLazy = produceList fromChunks
 -- {-# INLINE sinkLazy #-}
 
 sinkList :: Monad m => Source m a ([a] -> [a]) -> m [a]
@@ -376,10 +379,10 @@ sinkBuilder :: (Monad m, Monoid builder, ToBuilder a builder)
             => Sink a m builder
 sinkBuilder = foldMapC toBuilder
 
--- sinkLazyBuilder :: (Monad m, Monoid builder, ToBuilder a builder,
---                     Builder builder lazy)
---                 => Sink a m lazy
--- sinkLazyBuilder = liftM builderToLazy . foldMapC toBuilder
+sinkLazyBuilder :: (Monad m, Monoid builder, ToBuilder a builder,
+                    Builder builder lazy)
+                => Source m a builder -> m lazy
+sinkLazyBuilder = liftM builderToLazy . foldMapC toBuilder
 
 sinkNull :: Monad m => Sink a m ()
 sinkNull _ = return ()
@@ -424,8 +427,7 @@ headCE = undefined
 -- peekCE = undefined
 
 lastC :: Monad m => Sink a m (Maybe a)
-lastC await = resolve await Nothing (\_ x -> return (Just x))
---lastC = liftM getLast `liftM` foldMapC (Last . Just)
+lastC await = resolve await Nothing (const (return . Just))
 
 lastCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 lastCE = undefined
@@ -742,18 +744,24 @@ awaitForever f await z yield =
 zipSourceApp :: Monad m => Source m (x -> y) r -> Source m x r -> Source m y r
 zipSourceApp f arg z yield = f z $ \r x -> arg r $ \_ y -> yield z (x y)
 
--- newtype ZipSource m a r = ZipSource { getZipSource :: Source m a r }
+newtype ZipSource m r a = ZipSource { getZipSource :: Source m a r }
 
--- instance Monad m => Functor (ZipSource m a) where
---     fmap f (ZipSource p) = ZipSource $ \z yield -> p z $ \r x -> yield r (f x)
+instance Monad m => Functor (ZipSource m r) where
+    fmap f (ZipSource p) = ZipSource $ \z yield -> p z $ \r x -> yield r (f x)
 
--- instance Monad m => Applicative (ZipSource m a) where
---     pure x = ZipSource $ yieldOne x
---     ZipSource l <*> ZipSource r = ZipSource (zipSourceApp l r)
+instance Monad m => Applicative (ZipSource m r) where
+    pure x = ZipSource $ yieldOne x
+    ZipSource l <*> ZipSource r = ZipSource (zipSourceApp l r)
 
--- {-# LANGUAGE ImpredicativeTypes #-}
--- sequenceSources :: (Traversable f, Monad m) => f (Source m r r) -> Source m (f r)
--- sequenceSources = getZipSource . sequenceA . fmap ZipSource
+-- | Sequence a collection of sources, feeding them all the same input and
+--   yielding a collection of their results.
+--
+-- >>> sinkList $ sequenceSources [yieldOne 1, yieldOne 2, yieldOne 3]
+-- [[1,2,3]]
+
+sequenceSources :: (Traversable f, Monad m)
+                => f (Source m a r) -> Source m (f a) r
+sequenceSources = getZipSource . sequenceA . fmap ZipSource
 
 asyncC :: (MonadBaseControl IO m, Monad m)
        => (a -> m b) -> Conduit a m (Async (StM m b)) r

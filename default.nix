@@ -3,7 +3,7 @@
 , either, bifunctors, chunkedData, monoTraversable, text, foldl
 
 , primitive, streamingCommons, vector, filepath, mwcRandom
-, liftedAsync
+, liftedAsync, stm
 
 , conduit, conduitExtra, conduitCombinators
 }:
@@ -16,7 +16,7 @@ cabal.mkDerivation (self: {
     exceptions liftedBase mmorph monadControl mtl transformers
     transformersBase void either bifunctors chunkedData monoTraversable
     primitive streamingCommons vector filepath mwcRandom liftedAsync
-    foldl
+    foldl stm
   ];
   testDepends = [
     hspec mtl QuickCheck transformers void text criterion

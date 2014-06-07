@@ -15,12 +15,14 @@ module Conduit.Simple where
 
 import           Control.Applicative
 import           Control.Concurrent.Async.Lifted
+import           Control.Concurrent.STM
 import           Control.Exception.Lifted
 import           Control.Foldl
 import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
 import           Control.Monad.Catch hiding (bracket)
 import           Control.Monad.IO.Class
+import           Control.Monad.Loops
 import           Control.Monad.Morph
 import           Control.Monad.Primitive
 import           Control.Monad.Trans.Class
@@ -787,7 +789,7 @@ zipSinks :: Monad m
          -> (Source (StateT (r', s) m) i s' -> StateT (r', s) m r')
          -> Source m i (s, s') -> m (r, r')
 zipSinks x y await = do
-    let i = (error "accessing r", error "accessing r'")
+    let i = (error "accessing r'", error "accessing s")
     flip evalStateT i $ do
         r <- x $ \rx yieldx -> do
             r' <- lift $ y $ \ry yieldy -> EitherT $ do
@@ -878,3 +880,37 @@ fromFoldM (FoldM step initial final) await =
 toFoldM :: Monad m
         => Sink a m r -> (FoldM (EitherT r m) a r -> EitherT r m r) -> m r
 toFoldM sink f = sink $ \k yield -> f $ FoldM yield (return k) return
+
+-- | A Source for exhausting a TChan, but blocks if it is initially empty.
+sourceTChan :: TChan a -> Source STM a r
+sourceTChan chan z yield = go z
+  where
+    go r = do
+        x  <- lift $ readTChan chan
+        r' <- yield r x
+        mt <- lift $ isEmptyTChan chan
+        if mt
+            then return r'
+            else go r'
+
+sourceTQueue :: TQueue a -> Source STM a r
+sourceTQueue chan z yield = go z
+  where
+    go r = do
+        x  <- lift $ readTQueue chan
+        r' <- yield r x
+        mt <- lift $ isEmptyTQueue chan
+        if mt
+            then return r'
+            else go r'
+
+sourceTBQueue :: TBQueue a -> Source STM a r
+sourceTBQueue chan z yield = go z
+  where
+    go r = do
+        x  <- lift $ readTBQueue chan
+        r' <- yield r x
+        mt <- lift $ isEmptyTBQueue chan
+        if mt
+            then return r'
+            else go r'

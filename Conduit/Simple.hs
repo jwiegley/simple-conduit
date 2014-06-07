@@ -588,7 +588,8 @@ concatC :: (Monad m, MonoFoldable mono) => Conduit mono m (Element mono)
 concatC = undefined
 
 filterC :: Monad m => (a -> Bool) -> Conduit a m a
-filterC = undefined
+filterC f await z yield =
+    await z $ \r x -> if f x then yield r x else return r
 
 filterCE :: (IsSequence seq, Monad m)
          => (Element seq -> Bool) -> Conduit seq m seq
@@ -609,7 +610,18 @@ concatMapAccumC :: Monad m => (a -> accum -> (accum, [b])) -> accum -> Conduit a
 concatMapAccumC = undefined
 
 intersperseC :: Monad m => a -> Conduit a m a
-intersperseC = undefined
+intersperseC s await z yield = EitherT $ do
+    eres <- runEitherT $ await (Nothing, z) $ \(my, r) x ->
+        case my of
+            Nothing ->
+                return (Just x, r)
+            Just y  -> do
+                r' <- rewrap (Nothing,) $ yield r y
+                rewrap (Just x,) $ yield (snd r') s
+    case eres of
+        Left (_, r)        -> return $ Left r
+        Right (Nothing, r) -> return $ Right r
+        Right (Just x, r)  -> runEitherT $ yield r x
 
 encodeBase64C :: Monad m => Conduit ByteString m ByteString
 encodeBase64C = undefined
@@ -666,7 +678,7 @@ concatMapAccumMC :: Monad m
 concatMapAccumMC = undefined
 
 encodeUtf8C :: (Monad m, Utf8 text binary) => Conduit text m binary
-encodeUtf8C = undefined
+encodeUtf8C = mapC encodeUtf8
 
 decodeUtf8C :: MonadThrow m => Conduit ByteString m Text
 decodeUtf8C = undefined
@@ -680,11 +692,11 @@ lineAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
 lineAsciiC = undefined
 
 unlinesC :: (Monad m, IsSequence seq, Element seq ~ Char) => Conduit seq m seq
-unlinesC = undefined
+unlinesC = concatMapC (:[Seq.singleton '\n'])
 
 unlinesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
               => Conduit seq m seq
-unlinesAsciiC = undefined
+unlinesAsciiC = concatMapC (:[Seq.singleton 10])
 
 linesUnboundedC_ :: (Monad m, IsSequence seq, Eq (Element seq))
                  => Element seq -> Conduit seq m seq

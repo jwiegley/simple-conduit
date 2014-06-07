@@ -20,19 +20,19 @@ import           Control.Monad.Trans.Control
 import           Control.Monad.Trans.Either
 import           Data.Bifunctor
 import           Data.Builder
-import           Data.ByteString
+import           Data.ByteString hiding (hPut)
 -- import Data.Foldable
 import           Data.IOData
 import           Data.MonoTraversable
 import           Data.Monoid
-import           Data.NonNull
+import           Data.NonNull as NonNull
 import           Data.Sequences as Seq
 import           Data.Sequences.Lazy
 import qualified Data.Streaming.Filesystem as F
 import           Data.Text
 import           Data.Textual.Encoding
 import           Data.Traversable
-import           Data.Vector.Generic hiding (mapM)
+import           Data.Vector.Generic hiding (mapM, foldM)
 import           Data.Word
 import           Prelude hiding (mapM)
 import           System.FilePath ((</>))
@@ -258,18 +258,27 @@ dropCE n await z yield = rewrap snd $ await (n, z) go
         (x, y) = Seq.splitAt n' s
         xn = n' - fromIntegral (olength x)
 
-dropWhileC :: Monad m => (a -> Bool) -> Sink a m ()
-dropWhileC = undefined
+dropWhileC :: Monad m => (a -> Bool) -> Conduit a m a
+dropWhileC f await z yield = rewrap snd $ await (f, z) go
+  where
+    go (k, r) x | k x = return (k, r)
+    go (_, r) x = rewrap (const False,) $ yield r x
 
-dropWhileCE :: (Monad m, IsSequence seq) => (Element seq -> Bool) -> Sink seq m ()
-dropWhileCE = undefined
+dropWhileCE :: (Monad m, IsSequence seq) => (Element seq -> Bool) -> Conduit seq m seq
+dropWhileCE f await z yield = rewrap snd $ await (f, z) go
+  where
+    go  (k, r) s
+        | onull x   = return (k, r)
+        | otherwise = rewrap (const False,) $ yield r s
+      where
+        x = Seq.dropWhile k s
 
 foldC :: (Monad m, Monoid a) => Sink a m a
-foldC = undefined
+foldC = foldMapC id
 
 foldCE :: (Monad m, MonoFoldable mono, Monoid (Element mono))
        => Sink mono m (Element mono)
-foldCE = undefined
+foldCE = foldlC (\acc mono -> acc <> ofoldMap id mono) mempty
 
 foldlC :: Monad m => (a -> b -> a) -> a -> Sink b m a
 foldlC f z await = resolve await z ((return .) . f)
@@ -277,61 +286,66 @@ foldlC f z await = resolve await z ((return .) . f)
 
 foldlCE :: (Monad m, MonoFoldable mono)
         => (a -> Element mono -> a) -> a -> Sink mono m a
-foldlCE = undefined
+foldlCE f = foldlC (ofoldl' f)
 
 foldMapC :: (Monad m, Monoid b) => (a -> b) -> Sink a m b
 foldMapC f = foldlC (\acc x -> acc <> f x) mempty
 
 foldMapCE :: (Monad m, MonoFoldable mono, Monoid w)
           => (Element mono -> w) -> Sink mono m w
-foldMapCE = undefined
+foldMapCE = foldMapC . ofoldMap
 
 allC :: Monad m => (a -> Bool) -> Sink a m Bool
-allC = undefined
+allC f = liftM getAll `liftM` foldMapC (All . f)
 
 allCE :: (Monad m, MonoFoldable mono)
       => (Element mono -> Bool) -> Sink mono m Bool
-allCE = undefined
+allCE = allC . oall
 
 anyC :: Monad m => (a -> Bool) -> Sink a m Bool
-anyC = undefined
+anyC f = liftM getAny `liftM` foldMapC (Any . f)
 
 anyCE :: (Monad m, MonoFoldable mono)
       => (Element mono -> Bool) -> Sink mono m Bool
-anyCE = undefined
+anyCE = anyC . oany
 
 andC :: Monad m => Sink Bool m Bool
-andC = undefined
+andC = allC id
 
 andCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
       => Sink mono m Bool
-andCE = undefined
+andCE = allCE id
 
 orC :: Monad m => Sink Bool m Bool
-orC = undefined
+orC = anyC id
 
 orCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
      => Sink mono m Bool
-orCE = undefined
+orCE = anyCE id
 
 elemC :: (Monad m, Eq a) => a -> Sink a m Bool
-elemC = undefined
+elemC x = anyC (== x)
 
 elemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
-elemCE = undefined
+elemCE = anyC . Seq.elem
 
 notElemC :: (Monad m, Eq a) => a -> Sink a m Bool
-notElemC = undefined
+notElemC x = allC (/= x)
 
 notElemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
-notElemCE = undefined
+notElemCE = allC . Seq.notElem
+
+produceList :: Monad m => ([a] -> b) -> Sink a m b
+produceList f await =
+    (f . ($ [])) `liftM` resolve await id (\front x -> return (front . (x:)))
+{-# INLINE produceList #-}
 
 sinkLazy :: (Monad m, LazySequence lazy strict) => Sink strict m lazy
-sinkLazy = undefined
+sinkLazy = produceList fromChunks
+{-# INLINE sinkLazy #-}
 
 sinkList :: Monad m => Sink a m [a]
-sinkList await =
-    ($ []) `liftM` resolve await id (\front x -> return (front . (x:)))
+sinkList = produceList id
 {-# INLINE sinkList #-}
 
 sinkVector :: (MonadBase base m, Vector v a, PrimMonad base)
@@ -344,89 +358,95 @@ sinkVectorN = undefined
 
 sinkBuilder :: (Monad m, Monoid builder, ToBuilder a builder)
             => Sink a m builder
-sinkBuilder = undefined
+sinkBuilder = foldMapC toBuilder
 
 sinkLazyBuilder :: (Monad m, Monoid builder, ToBuilder a builder,
                     Builder builder lazy)
                 => Sink a m lazy
-sinkLazyBuilder = undefined
+sinkLazyBuilder = liftM builderToLazy . foldMapC toBuilder
 
 sinkNull :: Monad m => Sink a m ()
-sinkNull = undefined
+sinkNull _ = return ()
 
-awaitNonNull :: (Monad m, MonoFoldable a) => Sink a m (Maybe (NonNull a))
-awaitNonNull = undefined
+awaitNonNull :: (Monad m, MonoFoldable a) => Conduit a m (Maybe (NonNull a))
+awaitNonNull await z yield = await z $ \r x ->
+    maybe (return r) (yield r . Just) (NonNull.fromNullable x)
 
 headCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 headCE = undefined
 
-peekC :: Monad m => Sink a m (Maybe a)
-peekC = undefined
+-- jww (2014-06-07): These two cannot be implemented without leftover support.
+-- peekC :: Monad m => Sink a m (Maybe a)
+-- peekC = undefined
 
-peekCE :: (Monad m, MonoFoldable mono) => Sink mono m (Maybe (Element mono))
-peekCE = undefined
+-- peekCE :: (Monad m, MonoFoldable mono) => Sink mono m (Maybe (Element mono))
+-- peekCE = undefined
 
 lastC :: Monad m => Sink a m (Maybe a)
-lastC = undefined
+lastC await = resolve await Nothing (\_ x -> return (Just x))
+--lastC = liftM getLast `liftM` foldMapC (Last . Just)
 
 lastCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 lastCE = undefined
 
 lengthC :: (Monad m, Num len) => Sink a m len
-lengthC = undefined
+lengthC = foldlC (\x _ -> x + 1) 0
 
 lengthCE :: (Monad m, Num len, MonoFoldable mono) => Sink mono m len
-lengthCE = undefined
+lengthCE = foldlC (\x y -> x + fromIntegral (olength y)) 0
 
 lengthIfC :: (Monad m, Num len) => (a -> Bool) -> Sink a m len
-lengthIfC = undefined
+lengthIfC f = foldlC (\cnt a -> if f a then cnt + 1 else cnt) 0
 
 lengthIfCE :: (Monad m, Num len, MonoFoldable mono)
            => (Element mono -> Bool) -> Sink mono m len
-lengthIfCE = undefined
+lengthIfCE f = foldlCE (\cnt a -> if f a then cnt + 1 else cnt) 0
 
 maximumC :: (Monad m, Ord a) => Sink a m (Maybe a)
-maximumC = undefined
+maximumC await = resolve await Nothing $ \r y ->
+    return $ Just $ case r of
+        Just x -> max x y
+        _      -> y
 
 maximumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
 maximumCE = undefined
 
 minimumC :: (Monad m, Ord a) => Sink a m (Maybe a)
-minimumC = undefined
+minimumC await = resolve await Nothing $ \r y ->
+    return $ Just $ case r of
+        Just x -> min x y
+        _      -> y
 
 minimumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
 minimumCE = undefined
 
-nullC :: Monad m => Sink a m Bool
-nullC = undefined
+-- jww (2014-06-07): These two cannot be implemented without leftover support.
+-- nullC :: Monad m => Sink a m Bool
+-- nullC = undefined
 
-nullCE :: (Monad m, MonoFoldable mono) => Sink mono m Bool
-nullCE = undefined
+-- nullCE :: (Monad m, MonoFoldable mono) => Sink mono m Bool
+-- nullCE = undefined
 
 sumC :: (Monad m, Num a) => Sink a m a
 sumC = foldlC (+) 0
-
--- sumC :: (Monad m, Num a) => Sink a m a
--- sumC = undefined
 
 sumCE :: (Monad m, MonoFoldable mono, Num (Element mono))
       => Sink mono m (Element mono)
 sumCE = undefined
 
 productC :: (Monad m, Num a) => Sink a m a
-productC = undefined
+productC = foldlC (*) 1
 
 productCE :: (Monad m, MonoFoldable mono, Num (Element mono))
           => Sink mono m (Element mono)
 productCE = undefined
 
 findC :: Monad m => (a -> Bool) -> Sink a m (Maybe a)
-findC = undefined
+findC f await = resolve await Nothing $ \r x ->
+    if f x then left (Just x) else return r
 
 mapM_C :: Monad m => (a -> m ()) -> Sink a m ()
-mapM_C f await = do
-    _ <- runEitherT $ await () (const $ lift . f)
-    return ()
+mapM_C f await = resolve await () (const $ lift . f)
 {-# INLINE mapM_C #-}
 
 mapM_CE :: (Monad m, MonoFoldable mono)
@@ -434,36 +454,42 @@ mapM_CE :: (Monad m, MonoFoldable mono)
 mapM_CE = undefined
 
 foldMC :: Monad m => (a -> b -> m a) -> a -> Sink b m a
-foldMC = undefined
+foldMC f z await = resolve await z (\r x -> lift (f r x))
 
 foldMCE :: (Monad m, MonoFoldable mono)
         => (a -> Element mono -> m a) -> a -> Sink mono m a
 foldMCE = undefined
 
 foldMapMC :: (Monad m, Monoid w) => (a -> m w) -> Sink a m w
-foldMapMC = undefined
+foldMapMC f = foldMC (\acc x -> (acc <>) `liftM` f x) mempty
 
 foldMapMCE :: (Monad m, MonoFoldable mono, Monoid w)
            => (Element mono -> m w) -> Sink mono m w
 foldMapMCE = undefined
 
-sinkFile :: (MonadIO m, IOData a) => FilePath -> Sink a m ()
-sinkFile = undefined
+sinkFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
+         => FilePath -> Sink a m ()
+sinkFile fp = sinkIOHandle (liftIO $ openFile fp WriteMode)
 
 sinkHandle :: (MonadIO m, IOData a) => Handle -> Sink a m ()
-sinkHandle = undefined
+sinkHandle = mapM_C . hPut
 
-sinkIOHandle :: (MonadIO m, IOData a) => IO Handle -> Sink a m ()
-sinkIOHandle = undefined
+sinkIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
+             => IO Handle -> Sink a m ()
+sinkIOHandle alloc =
+    bracket
+        (liftIO alloc)
+        (liftIO . hClose)
+        . flip sinkHandle
 
 printC :: (Show a, MonadIO m) => Sink a m ()
-printC = undefined
+printC = mapM_C (liftIO . print)
 
 stdoutC :: (MonadIO m, IOData a) => Sink a m ()
-stdoutC = undefined
+stdoutC = sinkHandle stdout
 
 stderrC :: (MonadIO m, IOData a) => Sink a m ()
-stderrC = undefined
+stderrC = sinkHandle stderr
 
 mapC :: Monad m => (a -> b) -> Conduit a m b
 mapC f await z yield = await z (\acc x -> yield acc (f x))
@@ -478,7 +504,7 @@ omapCE = undefined
 
 concatMapC :: (Monad m, MonoFoldable mono)
            => (a -> mono) -> Conduit a m (Element mono)
-concatMapC = undefined
+concatMapC f await z yield = await z $ \r x -> ofoldlM yield r (f x)
 
 concatMapCE :: (Monad m, MonoFoldable mono, Monoid w)
             => (Element mono -> w) -> Conduit mono m w
@@ -497,8 +523,15 @@ takeC n await z yield = rewrap snd $ await (n, z) go
 takeCE :: (Monad m, IsSequence seq) => Index seq -> Conduit seq m seq
 takeCE = undefined
 
+-- | This function reads one more element than it yields, which would be a
+--   problem if Sinks were monadic, as they are in conduit or pipes.  There is
+--   no such concept as "resuming where the last conduit left off" in this
+--   library.
 takeWhileC :: Monad m => (a -> Bool) -> Conduit a m a
-takeWhileC = undefined
+takeWhileC f await z yield = rewrap snd $ await (f, z) go
+  where
+    go (k, z') x | k x = rewrap (k,) $ yield z' x
+    go (_, z') _ = left (const False, z')
 
 takeWhileCE :: (Monad m, IsSequence seq)
             => (Element seq -> Bool) -> Conduit seq m seq

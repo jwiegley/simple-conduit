@@ -10,6 +10,7 @@
 module Conduit.Simple where
 
 import           Control.Applicative
+import           Control.Concurrent.Async.Lifted
 import           Control.Exception.Lifted
 import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
@@ -752,3 +753,10 @@ instance Monad m => Applicative (ZipSource m) where
 -- {-# LANGUAGE ImpredicativeTypes #-}
 -- sequenceSources :: (Traversable f, Monad m) => f (Source m r) -> Source m (f r)
 -- sequenceSources = getZipSource . sequenceA . fmap ZipSource
+
+asyncC :: (MonadBaseControl IO m, Monad m)
+       => (a -> m b) -> Conduit a m (Async (StM m b))
+asyncC f await k yield = do
+    res <- async $ await k $ \r x ->
+        yield r =<< lift (async (f x))
+    wait res

@@ -5,6 +5,10 @@
 -- | Please see the project README for more details:
 --
 --   https://github.com/jwiegley/simple-conduit/blob/master/README.md
+--
+--   Also see this blog article:
+--
+--   https://www.newartisans.com/2014/06/simpler-conduit-library
 
 module Conduit.Simple where
 
@@ -22,7 +26,6 @@ import           Control.Monad.Trans.Either
 import           Data.Bifunctor
 import           Data.Builder
 import           Data.ByteString hiding (hPut)
--- import Data.Foldable
 import           Data.IOData
 import           Data.MonoTraversable
 import           Data.Monoid

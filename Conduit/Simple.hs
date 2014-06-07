@@ -16,6 +16,7 @@ module Conduit.Simple where
 import           Control.Applicative
 import           Control.Concurrent.Async.Lifted
 import           Control.Exception.Lifted
+import           Control.Foldl
 import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
 import           Control.Monad.Catch hiding (bracket)
@@ -858,3 +859,22 @@ asyncC f await k yield = do
     res <- async $ await k $ \r x ->
         yield r =<< lift (async (f x))
     wait res
+
+-- | Convert a 'Control.Foldl.FoldM' fold abstraction into a Sink.
+--
+--   NOTE: This requires ImpredicativeTypes in the code that uses it.
+--
+-- >>> fromFoldM (FoldM ((return .) . (+)) (return 0) return) $ yieldMany [1..10]
+-- 55
+fromFoldM :: Monad m => FoldM m a b -> (forall r. Source m a r) -> m b
+fromFoldM (FoldM step initial final) await =
+    initial >>= flip (resolve await) ((lift .) . step) >>= final
+
+-- | Convert a Sink into a 'Control.Foldl.FoldM', passing it into a
+--   continuation.
+--
+-- >>> toFoldM sumC (\f -> Control.Foldl.foldM f [1..10])
+-- 55
+toFoldM :: Monad m
+        => Sink a m r -> (FoldM (EitherT r m) a r -> EitherT r m r) -> m r
+toFoldM sink f = sink $ \k yield -> f $ FoldM yield (return k) return

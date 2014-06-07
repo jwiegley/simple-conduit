@@ -1,6 +1,6 @@
 { cabal, exceptions, hspec, liftedBase, mmorph, monadControl, mtl
 , QuickCheck, transformers, transformersBase, void, criterion
-, either, bifunctors, chunkedData, monoTraversable, text
+, either, bifunctors, chunkedData, monoTraversable, text, foldl
 
 , primitive, streamingCommons, vector, filepath, mwcRandom
 , liftedAsync
@@ -10,12 +10,13 @@
 
 cabal.mkDerivation (self: {
   pname = "simple-conduit";
-  version = "0.1.0";
+  version = "0.1.1";
   src = ./.;
   buildDepends = [
     exceptions liftedBase mmorph monadControl mtl transformers
     transformersBase void either bifunctors chunkedData monoTraversable
     primitive streamingCommons vector filepath mwcRandom liftedAsync
+    foldl
   ];
   testDepends = [
     hspec mtl QuickCheck transformers void text criterion

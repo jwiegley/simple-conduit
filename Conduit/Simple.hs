@@ -39,6 +39,11 @@ import           System.FilePath ((</>))
 import           System.IO
 import           System.Random.MWC
 
+-- | r is "resource", a is the incremental component of the stream
+--   should remind the reader of foldM
+--   Monad m => (a -> b -> m a) -> a -> [b] -> m a
+--   Either is to signal short-circuiting and trigger finalization via Left.
+--   EitherT r m r -- Left Monad Right
 type Source m a    = forall r. r -> (a -> r -> EitherT r m r) -> EitherT r m r
 type Conduit a m b = Source m a -> Source m b
 type Sink a m r    = Source m a -> m r

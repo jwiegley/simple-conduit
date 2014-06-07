@@ -12,10 +12,10 @@ Features surprisingly present:
     - Much simpler types; Void is no longer needed, for example
     - No special operators are needed; conduit pipelines can be expressed
       using only function application ($)
-    - Performance beats conduit in simple cases (162ms vs. 239ms)
+    - Performance beats conduit in simple cases (139ms vs. 259ms)
     - Early termination by consumers
     - Notification of uptream termination
-    - Not a continuation, so monad-control can be used for resource control
+    - monad-control can be used for resource control
     - Prompt finalization
     - Sources are Monoids (though making it an instance takes more work)
 

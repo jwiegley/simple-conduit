@@ -43,6 +43,14 @@ type Source m a    = forall r. r -> (a -> r -> EitherT r m r) -> EitherT r m r
 type Conduit a m b = Source m a -> Source m b
 type Sink a m r    = Source m a -> m r
 
+-- | Promote any sink to a source.  This can be used as if it were a source
+--   transformer (aka, a conduit):
+--
+-- >>> sinkList $ returnC $ sumC $ mapC (+1) $ sourceList [1..10]
+-- [65]
+returnC :: Monad m => m a -> Source m a
+returnC f z yield = flip yield z =<< lift f
+
 -- | Compose a 'Source' and a 'Conduit' into a new 'Source'.  Note that this
 --   is just flipped function application, so ($) can be used to achieve the
 --   same thing.
@@ -79,9 +87,11 @@ x <+> y = \r f -> flip y f =<< x r f
 --   requires a 'Monad' constraint rather than 'Functor'.
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
 rewrap f k = EitherT $ bimap f f `liftM` runEitherT k
+{-# INLINE rewrap #-}
 
-resolve :: Monad m => (a -> b -> EitherT r m r) -> a -> b -> m r
+resolve :: Monad m => (r -> a -> EitherT r m r) -> r -> a -> m r
 resolve await z f = either id id `liftM` runEitherT (await z f)
+{-# INLINE resolve #-}
 
 yieldMany :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)
 yieldMany xs z yield = ofoldlM (flip yield) z xs
@@ -195,79 +205,78 @@ dropC n await z yield = rewrap snd $ await (n, z) go
         | n' > 0    = return (n' - 1, z')
         | otherwise = rewrap (0,) $ yield x z'
 
-type Consumer a m b = m (a -> b)
-
-dropCE :: (Monad m, IsSequence seq) => Index seq -> Consumer seq m ()
+dropCE :: (Monad m, IsSequence seq) => Index seq -> Sink seq m ()
 dropCE = undefined
 
-dropWhileC :: Monad m => (a -> Bool) -> Consumer a m ()
+dropWhileC :: Monad m => (a -> Bool) -> Sink a m ()
 dropWhileC = undefined
 
-dropWhileCE :: (Monad m, IsSequence seq) => (Element seq -> Bool) -> Consumer seq m ()
+dropWhileCE :: (Monad m, IsSequence seq) => (Element seq -> Bool) -> Sink seq m ()
 dropWhileCE = undefined
 
-foldC :: (Monad m, Monoid a) => Consumer a m a
+foldC :: (Monad m, Monoid a) => Sink a m a
 foldC = undefined
 
 foldCE :: (Monad m, MonoFoldable mono, Monoid (Element mono))
-       => Consumer mono m (Element mono)
+       => Sink mono m (Element mono)
 foldCE = undefined
 
-foldlC :: Monad m => (a -> b -> a) -> a -> Consumer b m a
-foldlC = undefined
+foldlC :: Monad m => (a -> b -> a) -> a -> Sink b m a
+foldlC f z await = resolve await z ((return .) . flip f)
+{-# INLINE foldlC #-}
 
 foldlCE :: (Monad m, MonoFoldable mono)
-        => (a -> Element mono -> a) -> a -> Consumer mono m a
+        => (a -> Element mono -> a) -> a -> Sink mono m a
 foldlCE = undefined
 
-foldMapC :: (Monad m, Monoid b) => (a -> b) -> Consumer a m b
-foldMapC = undefined
+foldMapC :: (Monad m, Monoid b) => (a -> b) -> Sink a m b
+foldMapC f = foldlC (\acc x -> acc <> f x) mempty
 
 foldMapCE :: (Monad m, MonoFoldable mono, Monoid w)
-          => (Element mono -> w) -> Consumer mono m w
+          => (Element mono -> w) -> Sink mono m w
 foldMapCE = undefined
 
-allC :: Monad m => (a -> Bool) -> Consumer a m Bool
+allC :: Monad m => (a -> Bool) -> Sink a m Bool
 allC = undefined
 
 allCE :: (Monad m, MonoFoldable mono)
-      => (Element mono -> Bool) -> Consumer mono m Bool
+      => (Element mono -> Bool) -> Sink mono m Bool
 allCE = undefined
 
-anyC :: Monad m => (a -> Bool) -> Consumer a m Bool
+anyC :: Monad m => (a -> Bool) -> Sink a m Bool
 anyC = undefined
 
 anyCE :: (Monad m, MonoFoldable mono)
-      => (Element mono -> Bool) -> Consumer mono m Bool
+      => (Element mono -> Bool) -> Sink mono m Bool
 anyCE = undefined
 
-andC :: Monad m => Consumer Bool m Bool
+andC :: Monad m => Sink Bool m Bool
 andC = undefined
 
 andCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
-      => Consumer mono m Bool
+      => Sink mono m Bool
 andCE = undefined
 
-orC :: Monad m => Consumer Bool m Bool
+orC :: Monad m => Sink Bool m Bool
 orC = undefined
 
 orCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
-     => Consumer mono m Bool
+     => Sink mono m Bool
 orCE = undefined
 
-elemC :: (Monad m, Eq a) => a -> Consumer a m Bool
+elemC :: (Monad m, Eq a) => a -> Sink a m Bool
 elemC = undefined
 
-elemCE :: (Monad m, EqSequence seq) => Element seq -> Consumer seq m Bool
+elemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
 elemCE = undefined
 
-notElemC :: (Monad m, Eq a) => a -> Consumer a m Bool
+notElemC :: (Monad m, Eq a) => a -> Sink a m Bool
 notElemC = undefined
 
-notElemCE :: (Monad m, EqSequence seq) => Element seq -> Consumer seq m Bool
+notElemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
 notElemCE = undefined
 
-sinkLazy :: (Monad m, LazySequence lazy strict) => Consumer strict m lazy
+sinkLazy :: (Monad m, LazySequence lazy strict) => Sink strict m lazy
 sinkLazy = undefined
 
 sinkList :: Monad m => Sink a m [a]
@@ -276,89 +285,92 @@ sinkList await =
 {-# INLINE sinkList #-}
 
 sinkVector :: (MonadBase base m, Vector v a, PrimMonad base)
-           => Consumer a m (v a)
+           => Sink a m (v a)
 sinkVector = undefined
 
 sinkVectorN :: (MonadBase base m, Vector v a, PrimMonad base)
-            => Int -> Consumer a m (v a)
+            => Int -> Sink a m (v a)
 sinkVectorN = undefined
 
 sinkBuilder :: (Monad m, Monoid builder, ToBuilder a builder)
-            => Consumer a m builder
+            => Sink a m builder
 sinkBuilder = undefined
 
 sinkLazyBuilder :: (Monad m, Monoid builder, ToBuilder a builder,
                     Builder builder lazy)
-                => Consumer a m lazy
+                => Sink a m lazy
 sinkLazyBuilder = undefined
 
-sinkNull :: Monad m => Consumer a m ()
+sinkNull :: Monad m => Sink a m ()
 sinkNull = undefined
 
-awaitNonNull :: (Monad m, MonoFoldable a) => Consumer a m (Maybe (NonNull a))
+awaitNonNull :: (Monad m, MonoFoldable a) => Sink a m (Maybe (NonNull a))
 awaitNonNull = undefined
 
-headCE :: (Monad m, IsSequence seq) => Consumer seq m (Maybe (Element seq))
+headCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 headCE = undefined
 
-peekC :: Monad m => Consumer a m (Maybe a)
+peekC :: Monad m => Sink a m (Maybe a)
 peekC = undefined
 
-peekCE :: (Monad m, MonoFoldable mono) => Consumer mono m (Maybe (Element mono))
+peekCE :: (Monad m, MonoFoldable mono) => Sink mono m (Maybe (Element mono))
 peekCE = undefined
 
-lastC :: Monad m => Consumer a m (Maybe a)
+lastC :: Monad m => Sink a m (Maybe a)
 lastC = undefined
 
-lastCE :: (Monad m, IsSequence seq) => Consumer seq m (Maybe (Element seq))
+lastCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 lastCE = undefined
 
-lengthC :: (Monad m, Num len) => Consumer a m len
+lengthC :: (Monad m, Num len) => Sink a m len
 lengthC = undefined
 
-lengthCE :: (Monad m, Num len, MonoFoldable mono) => Consumer mono m len
+lengthCE :: (Monad m, Num len, MonoFoldable mono) => Sink mono m len
 lengthCE = undefined
 
-lengthIfC :: (Monad m, Num len) => (a -> Bool) -> Consumer a m len
+lengthIfC :: (Monad m, Num len) => (a -> Bool) -> Sink a m len
 lengthIfC = undefined
 
 lengthIfCE :: (Monad m, Num len, MonoFoldable mono)
-           => (Element mono -> Bool) -> Consumer mono m len
+           => (Element mono -> Bool) -> Sink mono m len
 lengthIfCE = undefined
 
-maximumC :: (Monad m, Ord a) => Consumer a m (Maybe a)
+maximumC :: (Monad m, Ord a) => Sink a m (Maybe a)
 maximumC = undefined
 
-maximumCE :: (Monad m, OrdSequence seq) => Consumer seq m (Maybe (Element seq))
+maximumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
 maximumCE = undefined
 
-minimumC :: (Monad m, Ord a) => Consumer a m (Maybe a)
+minimumC :: (Monad m, Ord a) => Sink a m (Maybe a)
 minimumC = undefined
 
-minimumCE :: (Monad m, OrdSequence seq) => Consumer seq m (Maybe (Element seq))
+minimumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
 minimumCE = undefined
 
-nullC :: Monad m => Consumer a m Bool
+nullC :: Monad m => Sink a m Bool
 nullC = undefined
 
-nullCE :: (Monad m, MonoFoldable mono) => Consumer mono m Bool
+nullCE :: (Monad m, MonoFoldable mono) => Sink mono m Bool
 nullCE = undefined
 
-sumC :: (Monad m, Num a) => Consumer a m a
-sumC = undefined
+sumC :: (Monad m, Num a) => Sink a m a
+sumC = foldlC (+) 0
+
+-- sumC :: (Monad m, Num a) => Sink a m a
+-- sumC = undefined
 
 sumCE :: (Monad m, MonoFoldable mono, Num (Element mono))
-      => Consumer mono m (Element mono)
+      => Sink mono m (Element mono)
 sumCE = undefined
 
-productC :: (Monad m, Num a) => Consumer a m a
+productC :: (Monad m, Num a) => Sink a m a
 productC = undefined
 
 productCE :: (Monad m, MonoFoldable mono, Num (Element mono))
-          => Consumer mono m (Element mono)
+          => Sink mono m (Element mono)
 productCE = undefined
 
-findC :: Monad m => (a -> Bool) -> Consumer a m (Maybe a)
+findC :: Monad m => (a -> Bool) -> Sink a m (Maybe a)
 findC = undefined
 
 mapM_C :: Monad m => (a -> m ()) -> Sink a m ()
@@ -368,39 +380,39 @@ mapM_C f await = do
 {-# INLINE mapM_C #-}
 
 mapM_CE :: (Monad m, MonoFoldable mono)
-        => (Element mono -> m ()) -> Consumer mono m ()
+        => (Element mono -> m ()) -> Sink mono m ()
 mapM_CE = undefined
 
-foldMC :: Monad m => (a -> b -> m a) -> a -> Consumer b m a
+foldMC :: Monad m => (a -> b -> m a) -> a -> Sink b m a
 foldMC = undefined
 
 foldMCE :: (Monad m, MonoFoldable mono)
-        => (a -> Element mono -> m a) -> a -> Consumer mono m a
+        => (a -> Element mono -> m a) -> a -> Sink mono m a
 foldMCE = undefined
 
-foldMapMC :: (Monad m, Monoid w) => (a -> m w) -> Consumer a m w
+foldMapMC :: (Monad m, Monoid w) => (a -> m w) -> Sink a m w
 foldMapMC = undefined
 
 foldMapMCE :: (Monad m, MonoFoldable mono, Monoid w)
-           => (Element mono -> m w) -> Consumer mono m w
+           => (Element mono -> m w) -> Sink mono m w
 foldMapMCE = undefined
 
-sinkFile :: (MonadIO m, IOData a) => FilePath -> Consumer a m ()
+sinkFile :: (MonadIO m, IOData a) => FilePath -> Sink a m ()
 sinkFile = undefined
 
-sinkHandle :: (MonadIO m, IOData a) => Handle -> Consumer a m ()
+sinkHandle :: (MonadIO m, IOData a) => Handle -> Sink a m ()
 sinkHandle = undefined
 
-sinkIOHandle :: (MonadIO m, IOData a) => IO Handle -> Consumer a m ()
+sinkIOHandle :: (MonadIO m, IOData a) => IO Handle -> Sink a m ()
 sinkIOHandle = undefined
 
-printC :: (Show a, MonadIO m) => Consumer a m ()
+printC :: (Show a, MonadIO m) => Sink a m ()
 printC = undefined
 
-stdoutC :: (MonadIO m, IOData a) => Consumer a m ()
+stdoutC :: (MonadIO m, IOData a) => Sink a m ()
 stdoutC = undefined
 
-stderrC :: (MonadIO m, IOData a) => Consumer a m ()
+stderrC :: (MonadIO m, IOData a) => Sink a m ()
 stderrC = undefined
 
 mapC :: Monad m => (a -> b) -> Conduit a m b

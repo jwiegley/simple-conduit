@@ -10,7 +10,7 @@
 
 cabal.mkDerivation (self: {
   pname = "simple-conduit";
-  version = "0.0.2";
+  version = "0.1.0";
   src = ./.;
   buildDepends = [
     exceptions liftedBase mmorph monadControl mtl transformers

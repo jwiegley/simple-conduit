@@ -20,6 +20,7 @@ import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
 import           Control.Monad.Catch hiding (bracket)
 import           Control.Monad.IO.Class
+import           Control.Monad.Morph
 import           Control.Monad.Primitive
 import           Control.Monad.Trans.Class
 import           Control.Monad.Trans.Control
@@ -767,19 +768,33 @@ sequenceSources :: (Traversable f, Monad m)
                 => f (Source m a r) -> Source m (f a) r
 sequenceSources = getZipSource . sequenceA . fmap ZipSource
 
+instance MFunctor (EitherT s) where
+  hoist f (EitherT m) = EitherT $ f m
+
+-- | Zip sinks together.  This function may be used multiple times:
+--
+-- >>> let mySink s await => resolve await () $ \() x -> liftIO $ print $ s <> show x
+-- >>> zipSinks sinkList (zipSinks (mySink "foo") (mySink "bar")) $ yieldMany [1,2,3]
+-- "foo: 1"
+-- "bar: 1"
+-- "foo: 2"
+-- "bar: 2"
+-- "foo: 3"
+-- "bar: 3"
+-- ([1,2,3],((),()))
 zipSinks :: Monad m
          => (Source (StateT (r', s) m) i s  -> StateT (r', s) m r)
          -> (Source (StateT (r', s) m) i s' -> StateT (r', s) m r')
-         -> (forall t. Source (StateT (r', s) m) i t)
-         -> m (r, r')
+         -> Source m i (s, s') -> m (r, r')
 zipSinks x y await = do
     let i = (error "accessing r", error "accessing r'")
     flip evalStateT i $ do
         r <- x $ \rx yieldx -> do
             r' <- lift $ y $ \ry yieldy -> EitherT $ do
-                    eres <- runEitherT $ await (rx, ry) $ \(rx', ry') u -> do
-                        x' <- rewrap (, ry') $ yieldx rx' u
-                        y' <- rewrap (rx' ,) $ yieldy ry' u
+                    st <- get
+                    eres <- lift $ runEitherT $ await (rx, ry) $ \(rx', ry') u -> do
+                        x' <- stripS st $ rewrap (, ry') $ yieldx rx' u
+                        y' <- stripS st $ rewrap (rx' ,) $ yieldy ry' u
                         return (fst x', snd y')
                     let (s, s') = either id id eres
                     modify (\(b, _) -> (b, s))
@@ -789,6 +804,9 @@ zipSinks x y await = do
                 gets snd
         r' <- gets fst
         return (r, r')
+  where
+    stripS :: (MFunctor t, Monad n) => b1 -> t (StateT b1 n) b -> t n b
+    stripS s = hoist (`evalStateT` s)
 
 newtype ZipSink i m r s = ZipSink { getZipSink :: Source m i r -> m s }
 

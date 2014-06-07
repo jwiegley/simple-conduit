@@ -26,7 +26,7 @@ import           Data.IOData
 import           Data.MonoTraversable
 import           Data.Monoid
 import           Data.NonNull
-import           Data.Sequences
+import           Data.Sequences as Seq
 import           Data.Sequences.Lazy
 import qualified Data.Streaming.Filesystem as F
 import           Data.Text
@@ -34,7 +34,6 @@ import           Data.Textual.Encoding
 import           Data.Traversable
 import           Data.Vector.Generic hiding (mapM)
 import           Data.Word
-import           Debug.Trace
 import           Prelude hiding (mapM)
 import           System.FilePath ((</>))
 import           System.IO
@@ -225,18 +224,39 @@ sourceDirectory dir z yield =
                 Nothing -> return r
                 Just fp -> loop =<< yield r (dir </> fp)
 
-sourceDirectoryDeep :: MonadIO m => Bool -> FilePath -> Source m FilePath
-sourceDirectoryDeep = undefined
+sourceDirectoryDeep :: (MonadBaseControl IO m, MonadIO m)
+                    => Bool -> FilePath -> Source m FilePath
+sourceDirectoryDeep followSymlinks startDir z yield =
+    start startDir z
+  where
+    start dir r = sourceDirectory dir r go
+
+    go r fp = do
+        ft <- liftIO $ F.getFileType fp
+        case ft of
+            F.FTFile -> yield r fp
+            F.FTFileSym -> yield r fp
+            F.FTDirectory -> start fp r
+            F.FTDirectorySym
+                | followSymlinks -> start fp r
+                | otherwise -> return r
+            F.FTOther -> return r
 
 dropC :: Monad m => Int -> Conduit a m a
 dropC n await z yield = rewrap snd $ await (n, z) go
   where
-    go (n', z') x
-        | n' > 0    = return (n' - 1, z')
-        | otherwise = rewrap (0,) $ yield z' x
+    go (n', r) _ | n' > 0 = return (n' - 1, r)
+    go (_, r) x = rewrap (0,) $ yield r x
 
-dropCE :: (Monad m, IsSequence seq) => Index seq -> Sink seq m ()
-dropCE = undefined
+dropCE :: (Monad m, IsSequence seq) => Index seq -> Conduit seq m seq
+dropCE n await z yield = rewrap snd $ await (n, z) go
+  where
+    go  (n', r) s
+        | onull y   = return (n' - xn, r)
+        | otherwise = rewrap (0,) $ yield r y
+      where
+        (x, y) = Seq.splitAt n' s
+        xn = n' - fromIntegral (olength x)
 
 dropWhileC :: Monad m => (a -> Bool) -> Sink a m ()
 dropWhileC = undefined

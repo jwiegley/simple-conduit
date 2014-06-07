@@ -168,9 +168,8 @@ repeatWhileMC m f z yield = go z
 replicateMC :: Monad m => Int -> m a -> Source m a
 replicateMC n m z yield = go n z
   where
-    go n' r
-        | n' > 0    = go (n' - 1) =<< yield r =<< lift m
-        | otherwise = return r
+    go n' r | n' > 0 = go (n' - 1) =<< yield r =<< lift m
+    go _ r = return r
 
 sourceHandle :: (MonadIO m, IOData a) => Handle -> Source m a
 sourceHandle h z yield = go z
@@ -353,7 +352,8 @@ notElemCE = allC . Seq.notElem
 
 produceList :: Monad m => ([a] -> b) -> Sink a m b
 produceList f await =
-    (f . ($ [])) `liftM` resolve await id (\front x -> return (front . (x:)))
+    (f . ($ [])) `liftM`
+        resolve await id (\front x -> front `seq` return (front . (x:)))
 {-# INLINE produceList #-}
 
 sinkLazy :: (Monad m, LazySequence lazy strict) => Sink strict m lazy
@@ -533,7 +533,8 @@ stderrC :: (MonadIO m, IOData a) => Sink a m ()
 stderrC = sinkHandle stderr
 
 mapC :: Monad m => (a -> b) -> Conduit a m b
-mapC f await z yield = await z (\acc x -> yield acc (f x))
+mapC f await z yield = await z $ \acc x ->
+    let y = f x in y `seq` acc `seq` yield acc y
 {-# INLINE mapC #-}
 
 mapCE :: (Monad m, Functor f) => (a -> b) -> Conduit (f a) m (f b)

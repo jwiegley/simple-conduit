@@ -23,7 +23,7 @@ cabal.mkDerivation (self: {
     conduit conduitExtra conduitCombinators
   ];
   doCheck = true;
-  configureFlags = "--enable-benchmarks";
+  configureFlags = "--enable-benchmarks --enable-executable-profiling";
   meta = {
     homepage = "http://github.com/jwiegley/simple-conduit";
     description = "A simplified version of the conduit library";

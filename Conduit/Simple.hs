@@ -25,6 +25,7 @@ import           Control.Monad.Catch hiding (bracket)
 import           Control.Monad.IO.Class
 import           Control.Monad.Morph
 import           Control.Monad.Primitive
+import           Control.Monad.Trans.Cont
 import           Control.Monad.Trans.Control
 import           Control.Monad.Trans.Either
 import           Control.Monad.Trans.State
@@ -61,6 +62,20 @@ import           System.Random.MWC as MWC
 type Source m a r    = r -> (r -> a -> EitherT r m r) -> EitherT r m r
 type Conduit a m b r = Source m a r -> Source m b r
 type Sink a m r      = Source m a r -> m r
+
+-- type SourceC m a r   = ContT () (ContT () (StateT r m)) a
+
+-- yieldMany' :: (Monad m, MonoFoldable mono) => mono -> SourceC m (Element mono) r
+-- yieldMany' xs = ContT $ \yield -> ofoldlM (\() x -> yield x) () xs
+
+-- sinkList' :: Monad m => SourceC m a ([a] -> [a]) -> m [a]
+-- sinkList' await =
+--     liftM ($ []) $ flip execStateT id $
+--         flip runContT return $ callCC $ \_exit ->
+--             runContT await $ \x -> lift get >>= \r -> do
+--                 let y = r . (x:)
+--                 -- exit y
+--                 lift $ put y
 
 -- | When wrapped in a 'SourceWrapper' using 'wrap', Sources offer a number of
 --   typeclass instances, one of which is Monad.  As a Monad, it behaves very

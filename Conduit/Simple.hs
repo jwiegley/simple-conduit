@@ -2,6 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 -- | Please see the project README for more details:
 --
@@ -32,6 +33,8 @@ import           Control.Monad.Trans.State
 import           Data.Bifunctor
 import           Data.Builder
 import           Data.ByteString hiding (hPut, putStrLn)
+import           Data.Foldable
+import           Data.Functor.Identity
 import           Data.IOData
 import           Data.MonoTraversable
 import           Data.Monoid
@@ -61,6 +64,57 @@ import           System.Random.MWC as MWC
 type Source m a r    = r -> (r -> a -> EitherT r m r) -> EitherT r m r
 type Conduit a m b r = Source m a r -> Source m b r
 type Sink a m r      = Source m a r -> m r
+
+-- | When wrapped in a 'SourceWrapper' using 'wrap', Sources offer a number of
+--   typeclass instances, one of which is Monad.  As a Monad, it behaves very
+--   much list the list monad: the value bound is each element of the
+--   iteration in turn.
+--
+-- @
+-- sinkList $ getSource $ do
+--     x <- wrap $ yieldMany [1..3]
+--     y <- wrap $ yieldMany [4..6]
+--     wrap $ yieldOne (x, y)
+--
+-- ==> [(1,4),(1,5),(1,6),(2,4),(2,5),(2,6),(3,4),(3,5),(3,6)]
+-- @
+newtype SourceWrapper m a = SourceWrapper { getSource :: forall r. Source m a r }
+
+wrap :: (forall r. Source m a r) -> SourceWrapper m a
+wrap = SourceWrapper
+
+instance Monad m => Monoid (SourceWrapper m a) where
+    mempty = SourceWrapper $ \z _ -> return z
+    SourceWrapper x `mappend` SourceWrapper y = SourceWrapper $ x <+> y
+
+instance Foldable (SourceWrapper Identity) where
+    foldMap f (SourceWrapper await) =
+        runIdentity $ resolve await mempty $ \r x -> return $ r <> f x
+
+instance Functor (SourceWrapper m) where
+    fmap f (SourceWrapper await) =
+        SourceWrapper $ \z yield -> await z $ \r x -> yield r (f x)
+
+instance Applicative (SourceWrapper m) where
+    pure x = SourceWrapper $ \z yield -> yield z x
+    SourceWrapper f <*> SourceWrapper g =
+        SourceWrapper $ \z yield ->
+            f z $ \r x ->
+                g r $ \r' y ->
+                    yield r' (x y)
+
+instance Monad (SourceWrapper m) where
+    return = pure
+    SourceWrapper await >>= f =
+        SourceWrapper $ \z yield ->
+            await z $ \r x ->
+                getSource (f x) r $ \r' y ->
+                    yield r' y
+
+newtype SinkWrapper a m r = SinkWrapper { getSink :: SourceWrapper m a -> m r }
+
+instance Monad m => Functor (SinkWrapper a m) where
+    fmap f (SinkWrapper k) = SinkWrapper $ \await -> f `liftM` k await
 
 -- | Promote any sink to a source.  This can be used as if it were a source
 --   transformer (aka, a conduit):

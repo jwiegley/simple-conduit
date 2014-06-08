@@ -1030,9 +1030,9 @@ whileMC f m z yield = go z
 --   where
 --     go = await z (\r x -> rewrap (\(Right r') -> r') $ yield (Right r) x)
 
--- trySourceC :: (MonadBaseControl IO m)
---            => Source m a r -> Source m (Either SomeException a) r
--- trySourceC await z yield = await z $ \r x ->
+-- tryC :: (Exception e, MonadBaseControl IO m)
+--      => Source m a r -> Source m a (Either e a)
+-- tryC await z yield = await z $ \r x ->
 --     catch (yield r (Right x)) $ \e -> yield r (Left (e :: SomeException))
 
 -- tryC :: (MonadBaseControl IO m)

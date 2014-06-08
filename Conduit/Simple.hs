@@ -23,10 +23,8 @@ import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
 import           Control.Monad.Catch hiding (bracket)
 import           Control.Monad.IO.Class
-import           Control.Monad.Loops
 import           Control.Monad.Morph
 import           Control.Monad.Primitive
-import           Control.Monad.Trans.Class
 import           Control.Monad.Trans.Control
 import           Control.Monad.Trans.Either
 import           Control.Monad.Trans.State
@@ -45,7 +43,6 @@ import qualified Data.Streaming.Filesystem as F
 import           Data.Text
 import           Data.Textual.Encoding
 import           Data.Traversable
-import           Data.Vector.Generic hiding (mapM, foldM, modify)
 import           Data.Word
 import           Prelude hiding (mapM)
 import           System.FilePath ((</>))

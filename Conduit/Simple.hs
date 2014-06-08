@@ -21,11 +21,10 @@ import           Control.Exception.Lifted
 import           Control.Foldl
 import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
-import           Control.Monad.Catch hiding (bracket)
+import           Control.Monad.Catch hiding (bracket, catch)
 import           Control.Monad.IO.Class
 import           Control.Monad.Morph
 import           Control.Monad.Primitive
-import           Control.Monad.Trans.Cont
 import           Control.Monad.Trans.Control
 import           Control.Monad.Trans.Either
 import           Control.Monad.Trans.State
@@ -49,6 +48,7 @@ import           Prelude hiding (mapM)
 import           System.FilePath ((</>))
 import           System.IO
 import           System.Random.MWC as MWC
+import Debug.Trace
 
 -- | In the type variable below, r stands for "result", with much the same
 --   meaning as you find in 'ContT'.  a is the type of each element in the
@@ -76,6 +76,17 @@ type Sink a m r      = Source m a r -> m r
 --                 let y = r . (x:)
 --                 -- exit y
 --                 lift $ put y
+
+type SourceC m a r = (a -> StateT r (EitherT r m) ()) -> StateT r (EitherT r m) ()
+
+yieldMany' :: (Monad m, MonoFoldable mono) => mono -> SourceC m (Element mono) r
+yieldMany' xs yield = ofoldlM (const yield) () xs
+
+resolve' :: Monad m => r -> StateT r (EitherT r m) () -> m r
+resolve' r m = either id id `liftM` runEitherT (execStateT m r)
+
+sinkList' :: Monad m => SourceC m a ([a] -> [a]) -> m [a]
+sinkList' await = liftM ($ []) $ resolve' id $ await $ \x -> modify (. (x:))
 
 -- | When wrapped in a 'SourceWrapper' using 'wrap', Sources offer a number of
 --   typeclass instances, one of which is Monad.  As a Monad, it behaves very
@@ -420,8 +431,7 @@ notElemCE = allC . Seq.notElem
 
 produceList :: Monad m => ([a] -> b) -> Source m a ([a] -> [a]) -> m b
 produceList f await =
-    (f . ($ [])) `liftM`
-        resolve await id (\front x -> front `seq` return (front . (x:)))
+    (f . ($ [])) `liftM` resolve await id (\front x -> return (front . (x:)))
 {-# INLINE produceList #-}
 
 sinkLazy :: (Monad m, LazySequence lazy strict)
@@ -601,9 +611,13 @@ stderrC :: (MonadIO m, IOData a) => Sink a m ()
 stderrC = sinkHandle stderr
 
 mapC :: Monad m => (a -> b) -> Conduit a m b r
-mapC f await z yield = await z $ \acc x ->
-    let y = f x in y `seq` acc `seq` yield acc y
+mapC f await z yield = await z $ \acc -> yield acc . f
 {-# INLINE mapC #-}
+
+mapC' :: Monad m => (a -> b) -> Conduit a m b r
+mapC' f await z yield = await z $ \acc x ->
+    let y = f x in y `seq` acc `seq` yield acc y
+{-# INLINE mapC' #-}
 
 mapCE :: (Monad m, Functor f) => (a -> b) -> Conduit (f a) m (f b) r
 mapCE = undefined
@@ -1000,3 +1014,27 @@ whileMC f m z yield = go z
         if cont
             then lift m >>= yield r >>= go
             else return r
+
+-- jww (2014-06-08): These exception handling functions are useless, since we
+-- can only catch downstream exceptions, not upstream as conduit users expect.
+
+-- catchC :: (Exception e, MonadBaseControl IO m)
+--        => Source m a r -> (e -> Source m a r) -> Source m a r
+-- catchC await handler z yield =
+--     await z $ \r x -> catch (yield r x) $ \e -> handler e r yield
+
+-- tryAroundC :: (Exception e, MonadBaseControl IO m)
+--            => Source m a r -> Source m a (Either e r)
+-- tryAroundC _ (Left e) _ = return (Left e)
+-- tryAroundC await (Right z) yield = rewrap Right go `catch` (return . Left)
+--   where
+--     go = await z (\r x -> rewrap (\(Right r') -> r') $ yield (Right r) x)
+
+-- trySourceC :: (MonadBaseControl IO m)
+--            => Source m a r -> Source m (Either SomeException a) r
+-- trySourceC await z yield = await z $ \r x ->
+--     catch (yield r (Right x)) $ \e -> yield r (Left (e :: SomeException))
+
+-- tryC :: (MonadBaseControl IO m)
+--        => Conduit a m b r -> Conduit a m (Either SomeException b) r
+-- tryC f await = trySourceC (f await)

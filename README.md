@@ -22,3 +22,7 @@ Features surprisingly present:
 What's interesting is that this library is simply a convenience for chaining
 monadic folds, and nothing more.  I find it interesting how much of conduit
 can be expressed using only that abstraction.
+
+See also my
+[blog article](http://newartisans.com/2014/06/simpler-conduit-library/) about
+this library.

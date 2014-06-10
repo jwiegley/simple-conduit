@@ -4,6 +4,7 @@ module Main where
 
 import qualified Conduit as C
 import           Conduit.Simple
+import           Control.Monad
 import           Control.Monad.IO.Class
 import           Criterion.Main (defaultMain, bench, nf)
 import           Data.Functor.Identity
@@ -25,7 +26,7 @@ main = do
     ws <- yieldMany [1..10] $= takeC 5 $= mapC (+2) $$ sinkList
     print (ws :: [Int])
 
-    us <- (sourceFile "simple-conduit.cabal" <+> sourceFile "README.md")
+    us <- (sourceFile "simple-conduit.cabal" <> sourceFile "README.md")
         $= takeC 1
         $$ sinkList
     print (T.unpack (decodeUtf8 (Prelude.head us)))
@@ -33,7 +34,7 @@ main = do
     vs <- sinkList
         $ mapC (<> "Hello")
         $ takeC 1
-        $ sourceFile "simple-conduit.cabal" <+> sourceFile "README.md"
+        $ sourceFile "simple-conduit.cabal" <> sourceFile "README.md"
     print (T.unpack (decodeUtf8 (Prelude.head vs)))
 
     x <- sinkList $ returnC $ sumC $ mapC (+1) $ yieldMany ([1..10] :: [Int])
@@ -45,8 +46,19 @@ main = do
         bench "centipede1" $ nf (runIdentity . useThis) ([1..1000000] :: [Int])
       , bench "conduit1"   $ nf (runIdentity . useThat) ([1..1000000] :: [Int])
       , bench "centipede2" $ nf (runIdentity . useThis) ([1..1000000] :: [Int])
+      , bench "centipede3" $ nf (runIdentity . useThis2) ([1..1000000] :: [Int])
       , bench "conduit2"   $ nf (runIdentity . useThat) ([1..1000000] :: [Int])
       ]
   where
     useThis xs = yieldMany xs $= mapC (+2) $$ sinkList
+    useThis2 xs = yieldMany2 xs $= mapC (+2) $$ sinkList2
     useThat xs = C.yieldMany xs C.$= C.mapC (+2) C.$$ C.sinkList
+
+yieldMany2 :: Monad m => [a] -> Source r m a
+yieldMany2 xs = Source $ \z yield -> foldM yield z xs
+{-# INLINE yieldMany2 #-}
+
+sinkList2 :: Monad m => Sink' a m ([a] -> [a]) [a]
+sinkList2 (Source await) =
+    liftM ($ []) $ resolve await id $ \r x -> return (r . (x:))
+{-# INLINE sinkList2 #-}

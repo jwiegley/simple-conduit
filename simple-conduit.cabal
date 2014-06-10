@@ -44,6 +44,7 @@ benchmark bench
     hs-source-dirs: test
     main-is: bench.hs
     type: exitcode-stdio-1.0
+    ghc-options:   -O2
     cpp-options:   -DTEST
     build-depends:   simple-conduit
                    , base

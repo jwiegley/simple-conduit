@@ -32,6 +32,7 @@ import           Data.Bifunctor
 import           Data.Builder
 import           Data.ByteString hiding (hPut, putStrLn)
 import           Data.IOData
+import           Data.IORef
 import           Data.MonoTraversable
 import           Data.Monoid
 import           Data.NonNull as NonNull
@@ -372,7 +373,7 @@ sourceDirectoryDeep followSymlinks startDir = Source go
                     | otherwise -> return r
                 F.FTOther -> return r
 
-dropC :: Monad m => Int -> Source (Int, r) m a -> Source r m a
+dropC :: Monad m => Int -> Conduit' (Int, r) r a m a
 dropC n (Source await) = Source $ \z yield ->
     rewrap snd $ await (n, z) (go yield)
   where
@@ -380,7 +381,7 @@ dropC n (Source await) = Source $ \z yield ->
     go yield (_, r) x = rewrap (0,) $ yield r x
 
 dropCE :: (Monad m, IsSequence seq)
-       => Index seq -> Source (Index seq, r) m seq -> Source r m seq
+       => Index seq -> Conduit' (Index seq, r) r seq m seq
 dropCE n (Source await) = Source $ \z yield ->
     rewrap snd $ await (n, z) (go yield)
   where
@@ -391,7 +392,7 @@ dropCE n (Source await) = Source $ \z yield ->
         (x, y) = Seq.splitAt n' s
         xn = n' - fromIntegral (olength x)
 
-dropWhileC :: Monad m => (a -> Bool) -> Source (a -> Bool, r) m a -> Source r m a
+dropWhileC :: Monad m => (a -> Bool) -> Conduit' (a -> Bool, r) r a m a
 dropWhileC f (Source await) = Source $ \z yield ->
     rewrap snd $ await (f, z) (go yield)
   where
@@ -399,8 +400,8 @@ dropWhileC f (Source await) = Source $ \z yield ->
     go yield (_, r) x = rewrap (const False,) $ yield r x
 
 dropWhileCE :: (Monad m, IsSequence seq)
-            => (Element seq -> Bool) -> Source (Element seq -> Bool, r) m seq
-            -> Source r m seq
+            => (Element seq -> Bool)
+            -> Conduit' (Element seq -> Bool, r) r seq m seq
 dropWhileCE f (Source await) =
     Source $ \z yield -> rewrap snd $ await (f, z) (go yield)
   where
@@ -432,44 +433,44 @@ foldMapCE :: (Monad m, MonoFoldable mono, Monoid w)
           => (Element mono -> w) -> Sink mono m w
 foldMapCE = foldMapC . ofoldMap
 
-allC :: Monad m => (a -> Bool) -> Source All m a -> m Bool
+allC :: Monad m => (a -> Bool) -> Sink' a m All Bool
 allC f = liftM getAll `liftM` foldMapC (All . f)
 
 allCE :: (Monad m, MonoFoldable mono)
-      => (Element mono -> Bool) -> Source All m mono -> m Bool
+      => (Element mono -> Bool) -> Sink' mono m All Bool
 allCE = allC . oall
 
-anyC :: Monad m => (a -> Bool) -> Source Any m a -> m Bool
+anyC :: Monad m => (a -> Bool) -> Sink' a m Any Bool
 anyC f = liftM getAny `liftM` foldMapC (Any . f)
 
 anyCE :: (Monad m, MonoFoldable mono)
-      => (Element mono -> Bool) -> Source Any m mono -> m Bool
+      => (Element mono -> Bool) -> Sink' mono m Any Bool
 anyCE = anyC . oany
 
-andC :: Monad m => Source All m Bool -> m Bool
+andC :: Monad m => Sink' Bool m All Bool
 andC = allC id
 
 andCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
-      => Source All m mono -> m Bool
+      => Sink' mono m All Bool
 andCE = allCE id
 
-orC :: Monad m => Source Any m Bool -> m Bool
+orC :: Monad m => Sink' Bool m Any Bool
 orC = anyC id
 
 orCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
-     => Source Any m mono -> m Bool
+     => Sink' mono m Any Bool
 orCE = anyCE id
 
-elemC :: (Monad m, Eq a) => a -> Source Any m a -> m Bool
+elemC :: (Monad m, Eq a) => a -> Sink' a m Any Bool
 elemC x = anyC (== x)
 
-elemCE :: (Monad m, EqSequence seq) => Element seq -> Source Any m seq -> m Bool
+elemCE :: (Monad m, EqSequence seq) => Element seq -> Sink' seq m Any Bool
 elemCE = anyC . Seq.elem
 
-notElemC :: (Monad m, Eq a) => a -> Source All m a -> m Bool
+notElemC :: (Monad m, Eq a) => a -> Sink' a m All Bool
 notElemC x = allC (/= x)
 
-notElemCE :: (Monad m, EqSequence seq) => Element seq -> Source All m seq -> m Bool
+notElemCE :: (Monad m, EqSequence seq) => Element seq -> Sink' seq m All Bool
 notElemCE = allC . Seq.notElem
 
 produceList :: Monad m => ([a] -> b) -> Source ([a] -> [a]) m a -> m b
@@ -478,11 +479,11 @@ produceList f (Source await) =
 {-# INLINE produceList #-}
 
 sinkLazy :: (Monad m, LazySequence lazy strict)
-         => Source ([strict] -> [strict]) m strict -> m lazy
+         => Sink' strict m ([strict] -> [strict]) lazy
 sinkLazy = produceList fromChunks
 -- {-# INLINE sinkLazy #-}
 
-sinkList :: Monad m => Source ([a] -> [a]) m a -> m [a]
+sinkList :: Monad m => Sink' a m ([a] -> [a]) [a]
 sinkList = produceList id
 {-# INLINE sinkList #-}
 
@@ -500,7 +501,7 @@ sinkBuilder = foldMapC toBuilder
 
 sinkLazyBuilder :: (Monad m, Monoid builder, ToBuilder a builder,
                     Builder builder lazy)
-                => Source builder m a -> m lazy
+                => Sink' a m builder lazy
 sinkLazyBuilder = liftM builderToLazy . foldMapC toBuilder
 
 sinkNull :: Monad m => Sink a m ()
@@ -516,27 +517,13 @@ headCE = undefined
 -- newtype Pipe a m b = Pipe { runPipe :: Sink a m b }
 
 -- instance Monad m => Functor (Pipe a m) where
---     fmap f (Pipe p) = Pipe $ liftM f . p
+--     fmap f (Pipe p) = Pipe $ \await -> f `liftM` p await
 
 -- instance Monad m => Monad (Pipe a m) where
 --     return x = Pipe $ \_ -> return x
 --     Pipe p >>= f = Pipe $ \await -> do
 --         x <- p await
 --         runPipe (f x) await
-
--- dropC' :: Monad m => Int -> Sink a m ()
--- dropC' n await = rewrap snd $ await n go
---   where
---     go (n', r) _ | n' > 0 = return (n' - 1, r)
---     go (_, r) x = rewrap (0,) $ yield r x
-
--- test :: IO [Int]
--- test = flip runPipe (yieldMany [1..10]) $ do
---     Pipe $ dropC' 2
---     Pipe sinkList
-
--- leftover :: Monad m => a -> ResumableSource r m a
--- leftover l z _ = lift (modify (Sequence.|> l)) >> return z
 
 -- jww (2014-06-07): These two cannot be implemented without leftover support.
 -- peekC :: Monad m => Sink a m (Maybe a)
@@ -818,7 +805,8 @@ lineAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
            => Conduit r seq m o -> Conduit r seq m o
 lineAsciiC = undefined
 
-unlinesC :: (Monad m, IsSequence seq, Element seq ~ Char) => Conduit r seq m seq
+unlinesC :: (Monad m, IsSequence seq, Element seq ~ Char)
+         => Conduit r seq m seq
 unlinesC = concatMapC (:[Seq.singleton '\n'])
 
 unlinesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
@@ -826,7 +814,7 @@ unlinesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
 unlinesAsciiC = concatMapC (:[Seq.singleton 10])
 
 linesUnboundedC_ :: (Monad m, IsSequence seq, Eq (Element seq))
-                 => Element seq -> Source (r, seq) m seq -> Source r m seq
+                 => Element seq -> Conduit' (r, seq) r seq m seq
 linesUnboundedC_ sep (Source await) = Source $ \z yield -> EitherT $ do
     eres <- runEitherT $ await (z, n) (go yield)
     case eres of
@@ -848,11 +836,11 @@ linesUnboundedC_ sep (Source await) = Source $ \z yield -> EitherT $ do
             (x, y) = Seq.break (== sep) t
 
 linesUnboundedC :: (Monad m, IsSequence seq, Element seq ~ Char)
-                => Source (r, seq) m seq -> Source r m seq
+                => Conduit' (r, seq) r seq m seq
 linesUnboundedC = linesUnboundedC_ '\n'
 
 linesUnboundedAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
-                     => Source (r, seq) m seq -> Source r m seq
+                     => Conduit' (r, seq) r seq m seq
 linesUnboundedAsciiC = linesUnboundedC_ 10
 
 -- | The use of 'awaitForever' in this library is just a bit different from
@@ -874,9 +862,6 @@ sequenceSources :: (Traversable f, Monad m)
                 => f (Source r m a) -> Source r m (f a)
 sequenceSources = sequenceA
 
-instance MFunctor (EitherT s) where
-  hoist f (EitherT m) = EitherT $ f m
-
 -- | Zip sinks together.  This function may be used multiple times:
 --
 -- >>> let mySink s await => resolve await () $ \() x -> liftIO $ print $ s <> show x
@@ -888,31 +873,31 @@ instance MFunctor (EitherT s) where
 -- "foo: 3"
 -- "bar: 3"
 -- ([1,2,3],((),()))
-zipSinks :: Monad m
-         => (Source s (StateT (r', s) m) i  -> StateT (r', s) m r)
-         -> (Source s' (StateT (r', s) m) i -> StateT (r', s) m r')
-         -> Source (s, s') m i -> m (r, r')
+--
+-- jww (2014-06-09): Can this be written sanely without resorting to IORefs?
+zipSinks :: MonadIO m
+         => Sink' a m s r -> Sink' a m s' r'-> Sink' a m (s, s') (r, r')
 zipSinks x y (Source await) = do
-    let i = (error "accessing r'", error "accessing s")
-    flip evalStateT i $ do
-        r <- x $ Source $ \rx yieldx -> do
-            r' <- lift $ y $ Source $ \ry yieldy -> EitherT $ do
-                    st <- get
-                    eres <- lift $ runEitherT $ await (rx, ry) $ \(rx', ry') u -> do
-                        x' <- stripS st $ rewrap (, ry') $ yieldx rx' u
-                        y' <- stripS st $ rewrap (rx' ,) $ yieldy ry' u
-                        return (fst x', snd y')
-                    let (s, s') = either id id eres
-                    modify (\(b, _) -> (b, s))
-                    return $ Right s'
-            lift $ do
-                modify (\(_, b) -> (r', b))
-                gets snd
-        r' <- gets fst
-        return (r, r')
-  where
-    stripS :: (MFunctor t, Monad n) => b1 -> t (StateT b1 n) b -> t n b
-    stripS s = hoist (`evalStateT` s)
+    res_s  <- liftIO $ newIORef (error "zipSinks: s never assigned a value")
+    res_r' <- liftIO $ newIORef (error "zipSinks: r' never assigned a value")
+    r <- x $ Source $ \rx yieldx -> do
+        r' <- lift $ y $ Source $ \ry yieldy -> EitherT $ do
+            (rx', ry') <- resolve await (rx, ry) $ \(rx', ry') u -> EitherT $ do
+                eres <- runEitherT $ yieldx rx' u
+                case eres of
+                    Left r -> return $ Left (r, ry')
+                    Right r -> do
+                        eres' <- runEitherT $ yieldy ry' u
+                        case eres' of
+                            Left r' -> return $ Left (r, r')
+                            Right r' -> return $ Right (r, r')
+            liftIO $ writeIORef res_s rx'
+            return $ Right ry'
+        liftIO $ do
+            writeIORef res_r' r'
+            readIORef res_s
+    r' <- liftIO $ readIORef res_r'
+    return (r, r')
 
 newtype ZipSink i m r s = ZipSink { getZipSink :: Source r m i -> m s }
 
@@ -930,14 +915,6 @@ instance Monad m => Applicative (ZipSink i m r) where
 sequenceSinks :: (Traversable f, Monad m)
               => f (Source r m i -> m s) -> Source r m i -> m (f s)
 sequenceSinks = getZipSink . sequenceA . fmap ZipSink
-
--- infixr 3 <*>
--- (<*>) :: Monad m
---       => (Source (StateT (r', s) m) i s  -> StateT (r', s) m r)
---       -> (Source (StateT (r', s) m) i s' -> StateT (r', s) m r')
---       -> Source m i (s, s') -> m (r, r')
--- (<*>) = zipSinks
--- {-# INLINE (<*>) #-}
 
 -- zipConduitApp :: Monad m => Conduit a m (x -> y) r -> Conduit a m x r -> Conduit a m y r
 -- zipConduitApp f arg = Source $ \z yield -> f z $ \r x -> arg r $ \_ y -> yield z (x y)

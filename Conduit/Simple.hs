@@ -15,6 +15,7 @@
 module Conduit.Simple where
 
 import           Control.Applicative
+import           Control.Concurrent hiding (yield)
 import           Control.Concurrent.Async.Lifted
 import           Control.Concurrent.STM
 import           Control.Exception.Lifted
@@ -798,10 +799,9 @@ awaitForever :: Monad m
 awaitForever f (Source await) = Source $ \z yield ->
     await z $ \r x -> f x (yield r) (return r)
 
-{-
 -- | Zip sinks together.  This function may be used multiple times:
 --
--- >>> let mySink s await => resolve await () $ \() x -> liftIO $ print $ s <> show x
+-- >>> let mySink s await = resolve await () $ \() x -> liftIO $ print $ s <> show x
 -- >>> zipSinks sinkList (zipSinks (mySink "foo") (mySink "bar")) $ yieldMany [1,2,3]
 -- "foo: 1"
 -- "bar: 1"
@@ -811,31 +811,47 @@ awaitForever f (Source await) = Source $ \z yield ->
 -- "bar: 3"
 -- ([1,2,3],((),()))
 --
--- jww (2014-06-09): Can this be written sanely without resorting to IORefs?
-zipSinks :: MonadIO m
-         => Sink a (StateT s m) r -> Sink a (StateT s' m) r'
-         -> Sink a m (r, r')
-zipSinks x y (Source await) = do
-    res_s  <- liftIO $ newIORef (error "zipSinks: s never assigned a value")
-    res_r' <- liftIO $ newIORef (error "zipSinks: r' never assigned a value")
-    r <- x $ Source $ \rx yieldx -> do
-        r' <- lift $ y $ Source $ \ry yieldy -> EitherT $ do
-            (rx', ry') <- resolve await (rx, ry) $ \(rx', ry') u -> EitherT $ do
-                eres <- runEitherT $ yieldx rx' u
-                case eres of
-                    Left r -> return $ Left (r, ry')
-                    Right r -> do
-                        eres' <- runEitherT $ yieldy ry' u
-                        case eres' of
-                            Left r' -> return $ Left (r, r')
-                            Right r' -> return $ Right (r, r')
-            liftIO $ writeIORef res_s rx'
-            return $ Right ry'
-        liftIO $ do
-            writeIORef res_r' r'
-            readIORef res_s
-    r' <- liftIO $ readIORef res_r'
-    return (r, r')
+-- Note that the two sinks are run concurrently, so watch out for possible
+-- race conditions if they try to interact with the same resources.
+zipSinks :: forall a m r r'. (MonadBaseControl IO m, MonadIO m)
+         => Sink a m r -> Sink a m r' -> Sink a m (r, r')
+zipSinks sink1 sink2 (Source await) = do
+    x <- liftIO newEmptyMVar
+    y <- liftIO newEmptyMVar
+    withAsync (sink1 $ sourceMaybeMVar x) $ \a ->
+        withAsync (sink2 $ sourceMaybeMVar y) $ \b -> do
+            _ <- runEitherT $ await () $ \() val -> do
+                liftIO $ putMVar x (Just val)
+                liftIO $ putMVar y (Just val)
+            liftIO $ putMVar x Nothing
+            liftIO $ putMVar y Nothing
+            waitBoth a b
+
+-- | Keep taking from an @MVar (Maybe a)@ until it yields 'Nothing'.
+sourceMaybeMVar :: forall m a. MonadIO m => MVar (Maybe a) -> Source m a
+sourceMaybeMVar var = Source go
+  where
+    go :: r -> (r -> a -> EitherT r m r) -> EitherT r m r
+    go z yield = loop z
+      where
+        loop r = do
+            mx <- liftIO $ takeMVar var
+            case mx of
+                Nothing -> return r
+                Just x  -> loop =<< yield r x
+
+-- | Keep taking from an @TMVar (Maybe a)@ until it yields 'Nothing'.
+sourceMaybeTMVar :: forall a. TMVar (Maybe a) -> Source STM a
+sourceMaybeTMVar var = Source go
+  where
+    go :: r -> (r -> a -> EitherT r STM r) -> EitherT r STM r
+    go z yield = loop z
+      where
+        loop r = do
+            mx <- lift $ takeTMVar var
+            case mx of
+                Nothing -> return r
+                Just x  -> loop =<< yield r x
 
 newtype ZipSink a m r = ZipSink { getZipSink :: Source m a -> m r }
 
@@ -852,7 +868,6 @@ instance Monad m => Applicative (ZipSink a m) where
 -- Implemented on top of @ZipSink@, see that data type for more details.
 sequenceSinks :: (Traversable f, Monad m) => f (Sink a m r) -> Sink a m (f r)
 sequenceSinks = getZipSink . sequenceA . fmap ZipSink
--}
 
 asyncC :: (MonadBaseControl IO m, Monad m)
        => (a -> m b) -> Conduit a m (Async (StM m b))
@@ -878,48 +893,32 @@ toFoldM :: Monad m
         => Sink a m r -> (forall s. FoldM (EitherT s m) a s -> EitherT s m s) -> m r
 toFoldM sink f = sink $ Source $ \k yield -> f $ FoldM yield (return k) return
 
+sourceSTM :: forall container a. (container a -> STM a)
+          -> (container a -> STM Bool)
+          -> container a
+          -> Source STM a
+sourceSTM reader tester chan = Source go
+  where
+    go :: r -> (r -> a -> EitherT r STM r) -> EitherT r STM r
+    go z yield = loop z
+      where
+        loop r = do
+            x  <- lift $ reader chan
+            r' <- yield r x
+            mt <- lift $ tester chan
+            if mt
+                then return r'
+                else loop r'
+
 -- | A Source for exhausting a TChan, but blocks if it is initially empty.
 sourceTChan :: forall a. TChan a -> Source STM a
-sourceTChan chan = Source go
-  where
-    go :: r -> (r -> a -> EitherT r STM r) -> EitherT r STM r
-    go z yield = loop z
-      where
-        loop r = do
-            x  <- lift $ readTChan chan
-            r' <- yield r x
-            mt <- lift $ isEmptyTChan chan
-            if mt
-                then return r'
-                else loop r'
+sourceTChan = sourceSTM readTChan isEmptyTChan
 
 sourceTQueue :: forall a. TQueue a -> Source STM a
-sourceTQueue chan = Source go
-  where
-    go :: r -> (r -> a -> EitherT r STM r) -> EitherT r STM r
-    go z yield = loop z
-      where
-        loop r = do
-            x  <- lift $ readTQueue chan
-            r' <- yield r x
-            mt <- lift $ isEmptyTQueue chan
-            if mt
-                then return r'
-                else loop r'
+sourceTQueue = sourceSTM readTQueue isEmptyTQueue
 
 sourceTBQueue :: forall a. TBQueue a -> Source STM a
-sourceTBQueue chan = Source go
-  where
-    go :: r -> (r -> a -> EitherT r STM r) -> EitherT r STM r
-    go z yield = loop z
-      where
-        loop r = do
-            x  <- lift $ readTBQueue chan
-            r' <- yield r x
-            mt <- lift $ isEmptyTBQueue chan
-            if mt
-                then return r'
-                else loop r'
+sourceTBQueue = sourceSTM readTBQueue isEmptyTBQueue
 
 untilMC :: forall m a. Monad m => m a -> m Bool -> Source m a
 untilMC m f = Source go

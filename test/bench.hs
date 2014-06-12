@@ -54,11 +54,11 @@ main = do
     useThis2 xs = yieldMany2 xs $= mapC (+2) $$ sinkList2
     useThat xs = C.yieldMany xs C.$= C.mapC (+2) C.$$ C.sinkList
 
-yieldMany2 :: Monad m => [a] -> Source r m a
+yieldMany2 :: Monad m => [a] -> Source m a
 yieldMany2 xs = Source $ \z yield -> foldM yield z xs
 {-# INLINE yieldMany2 #-}
 
-sinkList2 :: Monad m => Sink' a m ([a] -> [a]) [a]
+sinkList2 :: Monad m => Sink a m [a]
 sinkList2 (Source await) =
     liftM ($ []) $ resolve await id $ \r x -> return (r . (x:))
 {-# INLINE sinkList2 #-}

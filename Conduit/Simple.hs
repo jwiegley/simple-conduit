@@ -72,31 +72,36 @@ instance Functor (Source m) where
     fmap f (Source await) = Source $ \z yield -> await z $ \r x -> yield r (f x)
 
 instance Applicative (Source m) where
-    pure x = Source $ \z yield -> yield z x
-    Source f <*> Source g = Source $ \z yield ->
-        f z $ \r x ->
-            g r $ \r' y ->
-                yield r' (x y)
+    pure  = return
+    (<*>) = ap
 
 instance Monad (Source m) where
-    return = pure
+    return x = Source $ \z yield -> yield z x
     Source await >>= f = Source $ \z yield ->
-        await z $ \r x ->
-            getSource (f x) r $ \r' y ->
-                yield r' y
+        await z $ \r x -> getSource (f x) r $ \r' y -> yield r' y
 
-newtype SinkWrapper a m r = SinkWrapper { getSink :: Source m a -> m r }
+instance MonadIO m => MonadIO (Source m) where
+    liftIO m = Source $ \z yield -> yield z =<< liftIO m
 
-instance Monad m => Functor (SinkWrapper a m) where
-    fmap f (SinkWrapper k) = SinkWrapper $ \await -> f `liftM` k await
+instance MonadTrans Source where
+    lift m = Source $ \z yield -> yield z =<< lift m
+
+-- | Sequence a collection of sources.
+--
+-- >>> sinkList $ sequenceSources [yieldOne 1, yieldOne 2, yieldOne 3]
+-- [[1,2,3]]
+sequenceSources :: (Traversable f, Monad m) => f (Source m a) -> Source m (f a)
+sequenceSources = sequenceA
 
 -- | Promote any sink to a source.  This can be used as if it were a source
 --   transformer (aka, a conduit):
 --
--- >>> sinkList $ returnC $ sumC $ mapC (+1) $ sourceList [1..10]
+-- >>> sinkList $ returnC $ sumC $ mapC (+1) $ yieldMany [1..10]
 -- [65]
+--
+-- Note that 'returnC' is a synonym for 'Control.Monad.Trans.Class.lift'.
 returnC :: Monad m => m a -> Source m a
-returnC f = Source $ \z yield -> yield z =<< lift f
+returnC = lift
 
 -- | Compose a 'Source' and a 'Conduit' into a new 'Source'.  Note that this
 --   is just flipped function application, so ($) can be used to achieve the
@@ -140,6 +145,10 @@ resolve await z f = either id id `liftM` runEitherT (await z f)
 yieldMany :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)
 yieldMany xs = Source $ \z yield -> ofoldlM yield z xs
 {-# INLINE yieldMany #-}
+
+sourceList :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)
+sourceList = yieldMany
+{-# INLINE sourceList #-}
 
 yieldOne :: Monad m => a -> Source m a
 yieldOne x = Source $ \z yield -> yield z x
@@ -457,17 +466,6 @@ awaitNonNull (Source await) = Source $ \z yield -> await z $ \r x ->
 
 headCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 headCE = undefined
-
--- newtype Pipe a m b = Pipe { runPipe :: Sink a m b }
-
--- instance Monad m => Functor (Pipe a m) where
---     fmap f (Pipe p) = Pipe $ \await -> f `liftM` p await
-
--- instance Monad m => Monad (Pipe a m) where
---     return x = Pipe $ \_ -> return x
---     Pipe p >>= f = Pipe $ \await -> do
---         x <- p await
---         runPipe (f x) await
 
 -- jww (2014-06-07): These two cannot be implemented without leftover support.
 -- peekC :: Monad m => Sink a m (Maybe a)
@@ -800,13 +798,6 @@ awaitForever :: Monad m
 awaitForever f (Source await) = Source $ \z yield ->
     await z $ \r x -> f x (yield r) (return r)
 
--- | Sequence a collection of sources.
---
--- >>> sinkList $ sequenceSources [yieldOne 1, yieldOne 2, yieldOne 3]
--- [[1,2,3]]
-sequenceSources :: (Traversable f, Monad m) => f (Source m a) -> Source m (f a)
-sequenceSources = sequenceA
-
 {-
 -- | Zip sinks together.  This function may be used multiple times:
 --
@@ -821,7 +812,9 @@ sequenceSources = sequenceA
 -- ([1,2,3],((),()))
 --
 -- jww (2014-06-09): Can this be written sanely without resorting to IORefs?
-zipSinks :: MonadIO m => Sink a m r -> Sink a m r'-> Sink a m (r, r')
+zipSinks :: MonadIO m
+         => Sink a (StateT s m) r -> Sink a (StateT s' m) r'
+         -> Sink a m (r, r')
 zipSinks x y (Source await) = do
     res_s  <- liftIO $ newIORef (error "zipSinks: s never assigned a value")
     res_r' <- liftIO $ newIORef (error "zipSinks: r' never assigned a value")
@@ -857,31 +850,8 @@ instance Monad m => Applicative (ZipSink a m) where
 --   coalesce together all return values.
 --
 -- Implemented on top of @ZipSink@, see that data type for more details.
-sequenceSinks :: (Traversable f, Monad m)
-              => f (Source m i -> m s) -> Source m i -> m (f s)
+sequenceSinks :: (Traversable f, Monad m) => f (Sink a m r) -> Sink a m (f r)
 sequenceSinks = getZipSink . sequenceA . fmap ZipSink
--}
-
-{-
-zipConduitApp :: Monad m => Conduit a m (x -> y) r -> Conduit a m x r -> Conduit a m y r
-zipConduitApp f arg = Source $ \z yield -> f z $ \r x -> arg r $ \_ y -> yield z (x y)
-
-newtype ZipConduit a m r b = ZipConduit { getZipConduit :: Conduit a m b r }
-
-instance Monad m => Functor (ZipConduit a m r) where
-    fmap f (ZipConduit p) = ZipConduit $ \z yield -> p z $ \r x -> yield r (f x)
-
-instance Monad m => Applicative (ZipConduit a m r) where
-    pure x = ZipConduit $ yieldOne x
-    ZipConduit l <*> ZipConduit r = ZipConduit (zipConduitApp l r)
-
--- | Sequence a collection of sources.
---
--- >>> sinkList $ sequenceConduits [yieldOne 1, yieldOne 2, yieldOne 3]
--- [[1,2,3]]
-sequenceConduits :: (Traversable f, Monad m)
-                => f (Conduit a m b r) -> Conduit a m (f b) r
-sequenceConduits = getZipConduit . sequenceA . fmap ZipConduit
 -}
 
 asyncC :: (MonadBaseControl IO m, Monad m)
@@ -976,27 +946,3 @@ whileMC f m = Source go
             if cont
                 then lift m >>= yield r >>= loop
                 else return r
-
--- jww (2014-06-08): These exception handling functions are useless, since we
--- can only catch downstream exceptions, not upstream as conduit users expect.
-
--- catchC :: (Exception e, MonadBaseControl IO m)
---        => Source m a -> (e -> Source m a) -> Source m a
--- catchC await handler z yield =
---     await z $ \r x -> catch (yield r x) $ \e -> handler e r yield
-
--- tryAroundC :: (Exception e, MonadBaseControl IO m)
---            => Source m a -> Source m a (Either e r)
--- tryAroundC _ (Left e) _ = return (Left e)
--- tryAroundC await (Right z) yield = rewrap Right go `catch` (return . Left)
---   where
---     go = await z (\r x -> rewrap (\(Right r') -> r') $ yield (Right r) x)
-
--- tryC :: (Exception e, MonadBaseControl IO m)
---      => Source m a -> Source m a (Either e a)
--- tryC (Source await) = Source $ \z yield -> await z $ \r x ->
---     catch (yield r (Right x)) $ \e -> yield r (Left (e :: SomeException))
-
--- tryC :: (MonadBaseControl IO m)
---        => Conduit a m b r -> Conduit a m (Either SomeException b) r
--- tryC f (Source await) = trySourceC (f await)

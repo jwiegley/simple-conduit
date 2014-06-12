@@ -85,7 +85,8 @@ instance Monad m => Monad (CollectT a m) where
 --
 -- 'EitherT' is used to signal short-circuiting of the pipeline.
 newtype Source r m a = Source
-    { getSource :: r -> (r -> a -> EitherT r m r) -> EitherT r m r }
+    { getSource :: r -> (EitherT r m (r, Maybe a) -> EitherT r m (r, Bool))
+                     -> EitherT r m r }
 
 type Conduit' s r a m b = Source s m a -> Source r m b
 type Conduit r a m b    = Conduit' r r a m b
@@ -134,22 +135,27 @@ instance Monad m => Monoid (Source r m a) where
     mempty = Source $ const . return
     mappend x y = Source $ \r f -> flip (getSource y) f =<< getSource x r f
 
-instance Functor (Source r m) where
-    fmap f (Source await) = Source $ \z yield -> await z $ \r x -> yield r (f x)
+instance Monad m => Functor (Source r m) where
+    fmap f (Source await) = Source $ \z yield ->
+        await z $ \m -> yield (liftM (fmap (fmap f)) m)
 
-instance Applicative (Source r m) where
-    pure x = Source $ \z yield -> yield z x
+instance Monad m => Applicative (Source r m) where
+    pure x = Source $ \z yield -> liftM fst $ yield (return (z, Just x))
     Source f <*> Source g = Source $ \z yield ->
-        f z $ \r x ->
-            g r $ \r' y ->
-                yield r' (x y)
+        f z $ \mx -> do
+            (r, mfun) <- mx
+            case mfun of
+                Nothing  -> return (r, False)
+                Just fun -> liftM (, True) $ g r $ \my -> yield (liftM (fmap (fmap fun)) my)
 
-instance Monad (Source r m) where
+instance Monad m => Monad (Source r m) where
     return = pure
     Source await >>= f = Source $ \z yield ->
-        await z $ \r x ->
-            getSource (f x) r $ \r' y ->
-                yield r' y
+        await z $ \mx -> do
+            (r, mres) <- mx
+            case mres of
+                Nothing -> return (r, False)
+                Just x  -> liftM (, True) $ getSource (f x) r yield
 
 newtype SinkWrapper a m r = SinkWrapper
     { getSink :: forall s. Source s m a -> m r }
@@ -163,7 +169,7 @@ instance Monad m => Functor (SinkWrapper a m) where
 -- >>> sinkList $ returnC $ sumC $ mapC (+1) $ sourceList [1..10]
 -- [65]
 returnC :: Monad m => m a -> Source r m a
-returnC f = Source $ \z yield -> yield z =<< lift f
+returnC f = Source $ \z yield -> liftM fst $ yield $ lift $ liftM ((z,) . Just) f
 
 -- | Compose a 'Source' and a 'Conduit' into a new 'Source'.  Note that this
 --   is just flipped function application, so ($) can be used to achieve the
@@ -205,9 +211,10 @@ resolve await z f = either id id `liftM` runEitherT (await z f)
 {-# INLINE resolve #-}
 
 yieldMany :: (Monad m, MonoFoldable mono) => mono -> Source r m (Element mono)
-yieldMany xs = Source $ \z yield -> ofoldlM yield z xs
+yieldMany xs = Source $ \z yield -> ofoldlM (\r a -> liftM fst $ yield (return (r, Just a))) z xs
 {-# INLINE yieldMany #-}
 
+{-
 yieldOne :: Monad m => a -> Source r m a
 yieldOne x = Source $ \z yield -> yield z x
 {-# INLINE yieldOne #-}
@@ -284,6 +291,7 @@ replicateMC n m = Source $ go n
       where
         loop n' r | n' > 0 = loop (n' - 1) =<< yield r =<< lift m
         loop _ r = return r
+-}
 
 sourceHandle :: (MonadIO m, IOData a) => Handle -> Source r m a
 sourceHandle h = Source go
@@ -291,10 +299,13 @@ sourceHandle h = Source go
     go z yield = loop z
       where
         loop y = do
-            x <- liftIO $ hGetChunk h
-            if onull x
-                then return y
-                else loop =<< yield y x
+            (r, cont) <- yield $ do
+                x <- liftIO $ hGetChunk h
+                liftIO $ putStrLn "Reading..."
+                return (y, if onull x then Nothing else Just x)
+            if cont
+                then loop r
+                else return r
 
 sourceFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
            => FilePath -> Source r m a
@@ -315,6 +326,7 @@ sourceIOHandle f = Source $ \z yield ->
 stdinC :: (MonadBaseControl IO m, MonadIO m, IOData a) => Source r m a
 stdinC = sourceHandle stdin
 
+{-
 initRepeat :: Monad m => m seed -> (seed -> m a) -> Source r m a
 initRepeat mseed f = Source $ \z yield ->
     lift mseed >>= \seed -> getSource (repeatMC (f seed)) z yield
@@ -472,10 +484,14 @@ notElemC x = allC (/= x)
 
 notElemCE :: (Monad m, EqSequence seq) => Element seq -> Sink' seq m All Bool
 notElemCE = allC . Seq.notElem
+-}
 
 produceList :: Monad m => ([a] -> b) -> Source ([a] -> [a]) m a -> m b
 produceList f (Source await) =
-    (f . ($ [])) `liftM` resolve await id (\front x -> return (front . (x:)))
+    (f . ($ [])) `liftM` resolve await id
+        (\mx -> mx >>= \(front, mres) -> return $ case mres of
+                                           Nothing -> (front, False)
+                                           Just x  -> (front . (x:), True))
 {-# INLINE produceList #-}
 
 sinkLazy :: (Monad m, LazySequence lazy strict)
@@ -487,6 +503,7 @@ sinkList :: Monad m => Sink' a m ([a] -> [a]) [a]
 sinkList = produceList id
 {-# INLINE sinkList #-}
 
+{-
 sinkVector :: (MonadBase base m, Vector v a, PrimMonad base)
            => Sink a m (v a)
 sinkVector = undefined
@@ -1047,3 +1064,4 @@ whileMC f m = Source go
 -- tryC :: (MonadBaseControl IO m)
 --        => Conduit a m b r -> Conduit a m (Either SomeException b) r
 -- tryC f (Source await) = trySourceC (f await)
+-}

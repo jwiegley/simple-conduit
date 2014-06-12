@@ -35,9 +35,8 @@ import           Data.ByteString hiding (hPut, putStrLn)
 import           Data.Foldable
 import           Data.Functor.Identity
 import           Data.IOData
-{-
-import           Data.IORef
--}
+
+import           Data.List (unfoldr)
 import           Data.MonoTraversable
 import           Data.NonNull as NonNull
 import           Data.Semigroup
@@ -108,7 +107,9 @@ type Conduit a m b = Source m a -> Source m b
 type Sink a m r    = Source m a -> m r
 
 instance Monad m => Semigroup (Source m a) where
-    x <> y = Source $ \r f -> flip (getSource y) f =<< getSource x r f
+    x <> y = Source $ \r f -> lift $ do
+        r' <- sink r f x
+        sink r' f y
     {-# INLINE (<>) #-}
 
 instance Monad m => Monoid (Source m a) where
@@ -124,7 +125,7 @@ instance Monad m => Alternative (Source m) where
     {-# INLINE (<|>) #-}
 
 instance Functor (Source m) where
-    fmap f = awaitForever $ \r yield -> yield r . f
+    fmap f = conduit $ \r yield -> yield r . f
     {-# INLINE fmap #-}
 
 instance Applicative (Source m) where
@@ -143,7 +144,7 @@ instance Monad (Source m) where
     return x = Source $ \z yield -> yield z x
     {-# INLINE return #-}
     Source await >>= f = Source $ \z yield ->
-        await z $ \r x -> getSource (f x) r $ \r' y -> yield r' y
+        await z $ \r x -> getSource (f x) r yield
     {-# INLINE (>>=) #-}
 
 instance MonadIO m => MonadIO (Source m) where
@@ -159,17 +160,8 @@ instance MonadThrow m => MonadThrow (Source m) where
     {-# INLINE throwM #-}
 
 instance Foldable (Source Identity) where
-    foldMap f (Source await) =
-        runIdentity $ resolve await mempty $ \r x -> return $ r `mappend` f x
+    foldMap f = runIdentity . sink mempty (\r x -> return $ r `mappend` f x)
     {-# INLINE foldMap #-}
-
-abort :: Monad m => Source m a
-abort = Source $ const . left
-{-# INLINE abort #-}
-
-skip :: Monad m => Source m a
-skip = Source $ const . return
-{-# INLINE skip #-}
 
 -- | Sequence a collection of sources.
 --
@@ -178,16 +170,6 @@ skip = Source $ const . return
 sequenceSources :: (Traversable f, Monad m) => f (Source m a) -> Source m (f a)
 sequenceSources = sequenceA
 {-# INLINE sequenceSources #-}
-
--- | Promote any sink to a source.  This can be used as if it were a source
---   transformer (aka, a conduit):
---
--- >>> sinkList $ returnC $ sumC $ mapC (+1) $ yieldMany [1..10]
--- [65]
---
--- Note that 'returnC' is a synonym for 'Control.Monad.Trans.Class.lift'.
-returnC :: Monad m => m a -> Source m a
-returnC = lift
 
 -- | Compose a 'Source' and a 'Conduit' into a new 'Source'.  Note that this
 --   is just flipped function application, so ($) can be used to achieve the
@@ -212,94 +194,89 @@ infixr 0 $$
 ($$) = flip ($)
 {-# INLINE ($$) #-}
 
--- | This is just like 'Control.Monad.Trans.Either.bimapEitherT', but it only
---   requires a 'Monad' constraint rather than 'Functor'.
+awaitForever :: (a -> Source m b) -> Conduit a m b
+awaitForever = flip (>>=)
+{-# INLINE awaitForever #-}
+
+-- | Promote any sink to a source.  This can be used as if it were a source
+--   transformer (aka, a conduit):
+--
+-- >>> sinkList $ returnC $ sumC $ mapC (+1) $ yieldMany [1..10]
+-- [65]
+--
+-- Note that 'returnC' is a synonym for 'Control.Monad.Trans.Class.lift'.
+returnC :: Monad m => m a -> Source m a
+returnC = lift
+
+abort :: Monad m => Source m a
+abort = Source $ const . left
+{-# INLINE abort #-}
+
+skip :: Monad m => Source m a
+skip = Source $ const . return
+{-# INLINE skip #-}
+
+conduit :: (forall r. r -> (r -> b -> EitherT r m r) -> a -> EitherT r m r)
+        -> Conduit a m b
+conduit f (Source await) = Source $ \z -> await z . flip f
+{-# INLINE conduit #-}
+
+sink :: forall m a r. Monad m => r -> (r -> a -> EitherT r m r) -> Sink a m r
+sink z f (Source await) = either id id `liftM` runEitherT (await z f)
+{-# INLINE sink #-}
+
+-- | Most of the time conduit will pass through the fold variable unmolested,
+--   but sometimes you need to ignore that variable and use your own within
+--   that stage of the pipeline.  This is done by wrapping the fold variable
+--   in a tuple and then unwrapping it when the conduit is done.
+--   'conduitWith' makes this transparent.
+conduitWith :: Monad m
+            => s
+            -> (forall r. (r, s) -> (r -> b -> EitherT (r, s) m (r, s)) -> a
+                -> EitherT (r, s) m (r, s))
+            -> Conduit a m b
+conduitWith s f (Source await) = Source $ \z yield ->
+    rewrap fst $ await (z, s) $ \(r, t) ->
+        f (r, t) (\r' -> rewrap (, t) . yield r')
+{-# INLINE conduitWith #-}
+
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
 rewrap f k = EitherT $ bimap f f `liftM` runEitherT k
 {-# INLINE rewrap #-}
 
-rewrapM :: Monad m => (a -> EitherT b m b) -> EitherT a m a -> EitherT b m b
-rewrapM f k = EitherT $ do
-    eres <- runEitherT k
-    runEitherT $ either f f eres
-{-# INLINE rewrapM #-}
-
-resolve :: Monad m => (r -> a -> EitherT r m r) -> r -> a -> m r
-resolve await z f = either id id `liftM` runEitherT (await z f)
-{-# INLINE resolve #-}
-
-sink :: Monad m => r -> (r -> a -> EitherT r m r) -> Sink a m r
-sink r f (Source await) = resolve await r f
-{-# INLINE sink #-}
-
--- | The use of 'awaitForever' in this library is just a bit different from
---   conduit:
---
--- >>> awaitForever $ \r yield x -> if even x then yield r x else return r
-awaitForever :: (forall r. r -> (r -> b -> EitherT r m r) -> a -> EitherT r m r)
-             -> Conduit a m b
-awaitForever f (Source await) = Source $ \z -> await z . flip f
-{-# INLINE awaitForever #-}
+source :: Monad m
+       => (forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r)
+       -> Source m a
+source = Source
+{-# INLINE source #-}
 
 yieldMany :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)
 yieldMany xs = Source $ \z yield -> ofoldlM yield z xs
 {-# INLINE yieldMany #-}
 
-sourceList :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)
+sourceList :: Monad m => [a] -> Source m a
 sourceList = yieldMany
 {-# INLINE sourceList #-}
 
-yieldOne :: Monad m => a -> Source m a
-yieldOne x = Source $ \z yield -> yield z x
-{-# INLINE yieldOne #-}
-
 unfoldC :: forall m a b. Monad m => (b -> Maybe (a, b)) -> b -> Source m a
-unfoldC f i = Source $ go i
-  where
-    go :: forall r. b -> r -> (r -> a -> EitherT r m r) -> EitherT r m r
-    go y z yield = loop y z
-      where
-        loop x r = case f x of
-            Nothing      -> return r
-            Just (a, x') -> loop x' =<< yield r a
+unfoldC = (yieldMany .) . Data.List.unfoldr
+{-# INLINE unfoldC #-}
 
 enumFromToC :: forall m a. (Monad m, Enum a, Eq a) => a -> a -> Source m a
-enumFromToC start stop = Source $ go start
-  where
-    go :: forall r. a -> r -> (r -> a -> EitherT r m r) -> EitherT r m r
-    go y z yield = loop y z
-      where
-        loop a r
-            | a == stop = return r
-            | otherwise = loop (succ a) =<< yield r a
+enumFromToC = (yieldMany .) . enumFromTo
+{-# INLINE enumFromToC #-}
 
 iterateC :: forall m a. Monad m => (a -> a) -> a -> Source m a
-iterateC f i = Source $ go i
-  where
-    go :: forall r. a -> r -> (r -> a -> EitherT r m r) -> EitherT r m r
-    go y z yield = loop y z
-      where
-        loop x r = let x' = f x
-                   in loop x' =<< yield r x'
+iterateC = (yieldMany .) . iterate
+{-# INLINE iterateC #-}
 
 repeatC :: forall m a. Monad m => a -> Source m a
-repeatC x = Source go
-  where
-    go :: forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r
-    go z yield = loop z
-      where
-        loop y = loop =<< yield y x
+repeatC = yieldMany . Prelude.repeat
 {-# INLINE repeatC #-}
 
 replicateC :: forall m a. Monad m => Int -> a -> Source m a
-replicateC n x = Source $ go n
-  where
-    go :: Int -> r -> (r -> a -> EitherT r m r) -> EitherT r m r
-    go i z yield = loop i z
-      where
-        loop n' r
-            | n' >= 0   = loop (n' - 1) =<< yield r x
-            | otherwise = return r
+replicateC = (yieldMany .) . Prelude.replicate
+{-# INLINE replicateC #-}
 
 sourceLazy :: (Monad m, LazySequence lazy strict) => lazy -> Source m strict
 sourceLazy = yieldMany . toChunks
@@ -349,45 +326,50 @@ sourceHandle h = Source go
 sourceFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
            => FilePath -> Source m a
 sourceFile path = Source $ \z yield ->
-    bracket
-        (liftIO $ openFile path ReadMode)
-        (liftIO . hClose)
+    bracket (liftIO $ openFile path ReadMode) (liftIO . hClose)
         (\h -> getSource (sourceHandle h) z yield)
+{-# INLINE sourceFile #-}
 
 sourceIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
                => IO Handle -> Source m a
 sourceIOHandle f = Source $ \z yield ->
-    bracket
-        (liftIO f)
-        (liftIO . hClose)
+    bracket (liftIO f) (liftIO . hClose)
         (\h -> getSource (sourceHandle h) z yield)
+{-# INLINE sourceIOHandle #-}
 
 stdinC :: (MonadBaseControl IO m, MonadIO m, IOData a) => Source m a
 stdinC = sourceHandle stdin
+{-# INLINE stdinC #-}
 
 initRepeat :: Monad m => m seed -> (seed -> m a) -> Source m a
 initRepeat mseed f = Source $ \z yield ->
     lift mseed >>= \seed -> getSource (repeatMC (f seed)) z yield
+{-# INLINE initRepeat #-}
 
 initReplicate :: Monad m => m seed -> (seed -> m a) -> Int -> Source m a
 initReplicate mseed f n = Source $ \z yield ->
     lift mseed >>= \seed -> getSource (replicateMC n (f seed)) z yield
+{-# INLINE initReplicate #-}
 
 sourceRandom :: (Variate a, MonadIO m) => Source m a
 sourceRandom =
     initRepeat (liftIO MWC.createSystemRandom) (liftIO . MWC.uniform)
+{-# INLINE sourceRandom #-}
 
 sourceRandomN :: (Variate a, MonadIO m) => Int -> Source m a
 sourceRandomN =
     initReplicate (liftIO MWC.createSystemRandom) (liftIO . MWC.uniform)
+{-# INLINE sourceRandomN #-}
 
 sourceRandomGen :: (Variate a, MonadBase base m, PrimMonad base)
                 => Gen (PrimState base) -> Source m a
 sourceRandomGen gen = initRepeat (return gen) (liftBase . MWC.uniform)
+{-# INLINE sourceRandomGen #-}
 
 sourceRandomNGen :: (Variate a, MonadBase base m, PrimMonad base)
                  => Gen (PrimState base) -> Int -> Source m a
 sourceRandomNGen gen = initReplicate (return gen) (liftBase . MWC.uniform)
+{-# INLINE sourceRandomNGen #-}
 
 sourceDirectory :: forall m. (MonadBaseControl IO m, MonadIO m)
                 => FilePath -> Source m FilePath
@@ -426,49 +408,48 @@ sourceDirectoryDeep followSymlinks startDir = Source go
                 F.FTOther -> return r
 
 dropC :: Monad m => Int -> Conduit a m a
-dropC n (Source await) = Source $ \z yield ->
-    rewrap snd $ await (n, z) (go yield)
+dropC n = conduitWith n go
   where
-    go _ (n', r) _ | n' > 0 = return (n' - 1, r)
-    go yield (_, r) x = rewrap (0,) $ yield r x
+    go (r, n') _ _ | n' > 0 = return (r, n' - 1)
+    go (r, _) yield x       = yield r x
+{-# INLINE dropC #-}
 
-dropCE :: (Monad m, IsSequence seq)
-       => Index seq -> Conduit seq m seq
-dropCE n (Source await) = Source $ \z yield ->
-    rewrap snd $ await (n, z) (go yield)
+dropCE :: (Monad m, IsSequence seq) => Index seq -> Conduit seq m seq
+dropCE n = conduitWith n go
   where
-    go yield (n', r) s
-        | onull y   = return (n' - xn, r)
-        | otherwise = rewrap (0,) $ yield r y
+    go (r, n') yield s
+        | onull y   = return (r, n' - xn)
+        | otherwise = yield r y
       where
         (x, y) = Seq.splitAt n' s
         xn = n' - fromIntegral (olength x)
 
 dropWhileC :: Monad m => (a -> Bool) -> Conduit a m a
-dropWhileC f (Source await) = Source $ \z yield ->
-    rewrap snd $ await (f, z) (go yield)
+dropWhileC f = conduitWith f go
   where
-    go _ (k, r) x | k x = return (k, r)
-    go yield (_, r) x = rewrap (const False,) $ yield r x
+    go (r, k) _ x | k x = return (r, k)
+    -- Change out the predicate for one that always fails
+    go (r, _) yield x = fmap (const (const False)) <$> yield r x
 
 dropWhileCE :: (Monad m, IsSequence seq)
             => (Element seq -> Bool)
             -> Conduit seq m seq
-dropWhileCE f (Source await) =
-    Source $ \z yield -> rewrap snd $ await (f, z) (go yield)
+dropWhileCE f = conduitWith f go
   where
-    go yield (k, r) s
-        | onull x   = return (k, r)
-        | otherwise = rewrap (const False,) $ yield r s
+    go (r, k) yield s
+        | onull x   = return (r, k)
+        | otherwise = fmap (const (const False)) <$> yield r s
       where
         x = Seq.dropWhile k s
 
 foldC :: (Monad m, Monoid a) => Sink a m a
 foldC = foldMapC id
+{-# INLINE foldC #-}
 
 foldCE :: (Monad m, MonoFoldable mono, Monoid (Element mono))
        => Sink mono m (Element mono)
 foldCE = foldlC (\acc mono -> acc `mappend` ofoldMap id mono) mempty
+{-# INLINE foldCE #-}
 
 foldlC :: Monad m => (a -> b -> a) -> a -> Sink b m a
 foldlC f z = sink z ((return .) . f)
@@ -477,53 +458,68 @@ foldlC f z = sink z ((return .) . f)
 foldlCE :: (Monad m, MonoFoldable mono)
         => (a -> Element mono -> a) -> a -> Sink mono m a
 foldlCE f = foldlC (ofoldl' f)
+{-# INLINE foldlCE #-}
 
 foldMapC :: (Monad m, Monoid b) => (a -> b) -> Sink a m b
 foldMapC f = foldlC (\acc x -> acc `mappend` f x) mempty
+{-# INLINE foldMapC #-}
 
 foldMapCE :: (Monad m, MonoFoldable mono, Monoid w)
           => (Element mono -> w) -> Sink mono m w
 foldMapCE = foldMapC . ofoldMap
+{-# INLINE foldMapCE #-}
 
 allC :: Monad m => (a -> Bool) -> Sink a m Bool
 allC f = liftM getAll `liftM` foldMapC (All . f)
+{-# INLINE allC #-}
 
 allCE :: (Monad m, MonoFoldable mono)
       => (Element mono -> Bool) -> Sink mono m Bool
 allCE = allC . oall
+{-# INLINE allCE #-}
 
 anyC :: Monad m => (a -> Bool) -> Sink a m Bool
 anyC f = liftM getAny `liftM` foldMapC (Any . f)
+{-# INLINE anyC #-}
 
 anyCE :: (Monad m, MonoFoldable mono)
       => (Element mono -> Bool) -> Sink mono m Bool
 anyCE = anyC . oany
+{-# INLINE anyCE #-}
 
 andC :: Monad m => Sink Bool m Bool
 andC = allC id
+{-# INLINE andC #-}
 
 andCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
       => Sink mono m Bool
 andCE = allCE id
+{-# INLINE andCE #-}
 
 orC :: Monad m => Sink Bool m Bool
 orC = anyC id
+{-# INLINE orC #-}
 
 orCE :: (Monad m, MonoFoldable mono, Element mono ~ Bool)
      => Sink mono m Bool
 orCE = anyCE id
+{-# INLINE orCE #-}
 
 elemC :: (Monad m, Eq a) => a -> Sink a m Bool
 elemC x = anyC (== x)
+{-# INLINE elemC #-}
 
 elemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
 elemCE = anyC . Seq.elem
+{-# INLINE elemCE #-}
 
 notElemC :: (Monad m, Eq a) => a -> Sink a m Bool
 notElemC x = allC (/= x)
+{-# INLINE notElemC #-}
 
 notElemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
 notElemCE = allC . Seq.notElem
+{-# INLINE notElemCE #-}
 
 produceList :: Monad m => ([a] -> b) -> Sink a m b
 produceList f =
@@ -549,21 +545,26 @@ sinkVectorN = undefined
 sinkBuilder :: (Monad m, Monoid builder, ToBuilder a builder)
             => Sink a m builder
 sinkBuilder = foldMapC toBuilder
+{-# INLINE sinkBuilder #-}
 
 sinkLazyBuilder :: (Monad m, Monoid builder, ToBuilder a builder,
                     Builder builder lazy)
                 => Sink a m lazy
 sinkLazyBuilder = liftM builderToLazy . foldMapC toBuilder
+{-# INLINE sinkLazyBuilder #-}
 
 sinkNull :: Monad m => Sink a m ()
 sinkNull _ = return ()
+{-# INLINE sinkNull #-}
 
 awaitNonNull :: (Monad m, MonoFoldable a) => Conduit a m (Maybe (NonNull a))
-awaitNonNull = awaitForever $ \r yield x ->
+awaitNonNull = conduit $ \r yield x ->
     maybe (return r) (yield r . Just) (NonNull.fromNullable x)
+{-# INLINE awaitNonNull #-}
 
 headCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 headCE = undefined
+{-# INLINE headCE #-}
 
 -- jww (2014-06-07): These two cannot be implemented without leftover support.
 -- peekC :: Monad m => Sink a m (Maybe a)
@@ -573,41 +574,45 @@ headCE = undefined
 -- peekCE = undefined
 
 lastC :: Monad m => Sink a m (Maybe a)
-lastC (Source await) = resolve await Nothing (const (return . Just))
+lastC = sink Nothing (const (return . Just))
+{-# INLINE lastC #-}
 
 lastCE :: (Monad m, IsSequence seq) => Sink seq m (Maybe (Element seq))
 lastCE = undefined
+{-# INLINE lastCE #-}
 
 lengthC :: (Monad m, Num len) => Sink a m len
 lengthC = foldlC (\x _ -> x + 1) 0
+{-# INLINE lengthC #-}
 
 lengthCE :: (Monad m, Num len, MonoFoldable mono) => Sink mono m len
 lengthCE = foldlC (\x y -> x + fromIntegral (olength y)) 0
+{-# INLINE lengthCE #-}
 
 lengthIfC :: (Monad m, Num len) => (a -> Bool) -> Sink a m len
 lengthIfC f = foldlC (\cnt a -> if f a then cnt + 1 else cnt) 0
+{-# INLINE lengthIfC #-}
 
 lengthIfCE :: (Monad m, Num len, MonoFoldable mono)
            => (Element mono -> Bool) -> Sink mono m len
 lengthIfCE f = foldlCE (\cnt a -> if f a then cnt + 1 else cnt) 0
+{-# INLINE lengthIfCE #-}
 
 maximumC :: (Monad m, Ord a) => Sink a m (Maybe a)
-maximumC (Source await) = resolve await Nothing $ \r y ->
-    return $ Just $ case r of
-        Just x -> max x y
-        _      -> y
+maximumC = sink Nothing $ \r y -> return $ Just $ maybe y (max y) r
+{-# INLINE maximumC #-}
 
 maximumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
 maximumCE = undefined
+{-# INLINE maximumCE #-}
 
 minimumC :: (Monad m, Ord a) => Sink a m (Maybe a)
-minimumC (Source await) = resolve await Nothing $ \r y ->
-    return $ Just $ case r of
-        Just x -> min x y
-        _      -> y
+minimumC = sink Nothing $ \r y -> return $ Just $ maybe y (min y) r
+{-# INLINE minimumC #-}
 
 minimumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
 minimumCE = undefined
+{-# INLINE minimumCE #-}
 
 -- jww (2014-06-07): These two cannot be implemented without leftover support.
 -- nullC :: Monad m => Sink a m Bool
@@ -618,20 +623,25 @@ minimumCE = undefined
 
 sumC :: (Monad m, Num a) => Sink a m a
 sumC = foldlC (+) 0
+{-# INLINE sumC #-}
 
 sumCE :: (Monad m, MonoFoldable mono, Num (Element mono))
       => Sink mono m (Element mono)
 sumCE = undefined
+{-# INLINE sumCE #-}
 
 productC :: (Monad m, Num a) => Sink a m a
 productC = foldlC (*) 1
+{-# INLINE productC #-}
 
 productCE :: (Monad m, MonoFoldable mono, Num (Element mono))
           => Sink mono m (Element mono)
 productCE = undefined
+{-# INLINE productCE #-}
 
 findC :: Monad m => (a -> Bool) -> Sink a m (Maybe a)
 findC f = sink Nothing $ \r x -> if f x then left (Just x) else return r
+{-# INLINE findC #-}
 
 mapM_C :: Monad m => (a -> m ()) -> Sink a m ()
 mapM_C f = sink () (const $ lift . f)
@@ -640,75 +650,85 @@ mapM_C f = sink () (const $ lift . f)
 mapM_CE :: (Monad m, MonoFoldable mono)
         => (Element mono -> m ()) -> Sink mono m ()
 mapM_CE = undefined
+{-# INLINE mapM_CE #-}
 
 foldMC :: Monad m => (a -> b -> m a) -> a -> Sink b m a
-foldMC f z (Source await) = resolve await z (\r x -> lift (f r x))
+foldMC f = flip sink ((lift .) . f)
+{-# INLINE foldMC #-}
 
 foldMCE :: (Monad m, MonoFoldable mono)
         => (a -> Element mono -> m a) -> a -> Sink mono m a
 foldMCE = undefined
+{-# INLINE foldMCE #-}
 
 foldMapMC :: (Monad m, Monoid w) => (a -> m w) -> Sink a m w
 foldMapMC f = foldMC (\acc x -> (acc `mappend`) `liftM` f x) mempty
+{-# INLINE foldMapMC #-}
 
 foldMapMCE :: (Monad m, MonoFoldable mono, Monoid w)
            => (Element mono -> m w) -> Sink mono m w
 foldMapMCE = undefined
+{-# INLINE foldMapMCE #-}
 
 sinkFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
          => FilePath -> Sink a m ()
 sinkFile fp = sinkIOHandle (liftIO $ openFile fp WriteMode)
+{-# INLINE sinkFile #-}
 
 sinkHandle :: (MonadIO m, IOData a) => Handle -> Sink a m ()
 sinkHandle = mapM_C . hPut
+{-# INLINE sinkHandle #-}
 
 sinkIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
              => IO Handle -> Sink a m ()
 sinkIOHandle alloc =
     bracket (liftIO alloc) (liftIO . hClose) . flip sinkHandle
+{-# INLINE sinkIOHandle #-}
 
 printC :: (Show a, MonadIO m) => Sink a m ()
 printC = mapM_C (liftIO . print)
+{-# INLINE printC #-}
 
 stdoutC :: (MonadIO m, IOData a) => Sink a m ()
 stdoutC = sinkHandle stdout
+{-# INLINE stdoutC #-}
 
 stderrC :: (MonadIO m, IOData a) => Sink a m ()
 stderrC = sinkHandle stderr
+{-# INLINE stderrC #-}
 
 mapC :: Monad m => (a -> b) -> Conduit a m b
-mapC f = awaitForever $ \r yield -> yield r . f
+mapC = fmap
 {-# INLINE mapC #-}
-
-mapC' :: Monad m => (a -> b) -> Conduit a m b
-mapC' f = awaitForever $ \r yield x -> let y = f x in y `seq` r `seq` yield r y
-{-# INLINE mapC' #-}
 
 mapCE :: (Monad m, Functor f) => (a -> b) -> Conduit (f a) m (f b)
 mapCE = undefined
+{-# INLINE mapCE #-}
 
 omapCE :: (Monad m, MonoFunctor mono)
        => (Element mono -> Element mono) -> Conduit mono m mono
 omapCE = undefined
+{-# INLINE omapCE #-}
 
 concatMapC :: (Monad m, MonoFoldable mono)
            => (a -> mono) -> Conduit a m (Element mono)
-concatMapC f = awaitForever $ \r yield -> ofoldlM yield r . f
+concatMapC f = conduit $ \r yield -> ofoldlM yield r . f
+{-# INLINE concatMapC #-}
 
 concatMapCE :: (Monad m, MonoFoldable mono, Monoid w)
             => (Element mono -> w) -> Conduit mono m w
 concatMapCE = undefined
+{-# INLINE concatMapCE #-}
 
-takeC :: Monad m => Int -> Source m a -> Source m a
-takeC n (Source await) =
-    Source $ \z yield -> rewrap snd $ await (n, z) (go yield)
+takeC :: Monad m => Int -> Conduit a m a
+takeC n = conduitWith n go
   where
-    go yield (n', z') x
+    go (z', n') yield x
         | n' > 1    = next
         | n' > 0    = left =<< next
-        | otherwise = left (0, z')
+        | otherwise = left (z', 0)
       where
-        next = rewrap (n' - 1,) $ yield z' x
+        next = fmap pred <$> yield z' x
 
 takeCE :: (Monad m, IsSequence seq) => Index seq -> Conduit seq m seq
 takeCE = undefined
@@ -717,11 +737,11 @@ takeCE = undefined
 --   problem if Sinks were monadic, as they are in conduit or pipes.  There is
 --   no such concept as "resuming where the last conduit left off" in this
 --   library.
-takeWhileC :: Monad m => (a -> Bool) -> Source m a -> Source m a
-takeWhileC f (Source await) = Source $ \z yield -> rewrap snd $ await (f, z) (go yield)
+takeWhileC :: Monad m => (a -> Bool) -> Conduit a m a
+takeWhileC f = conduitWith f go
   where
-    go yield (k, z') x | k x = rewrap (k,) $ yield z' x
-    go _ (_, z') _ = left (const False, z')
+    go (z', k) yield x | k x = yield z' x
+    go (z', _) _ _           = left (z', const False)
 
 takeWhileCE :: (Monad m, IsSequence seq)
             => (Element seq -> Bool) -> Conduit seq m seq
@@ -738,14 +758,17 @@ concatC :: (Monad m, MonoFoldable mono) => Conduit mono m (Element mono)
 concatC = undefined
 
 filterC :: Monad m => (a -> Bool) -> Conduit a m a
-filterC f = awaitForever $ \r yield x -> if f x then yield r x else return r
+filterC f = awaitForever $ \x -> if f x then return x else skip
+{-# INLINE filterC #-}
 
 filterCE :: (IsSequence seq, Monad m)
          => (Element seq -> Bool) -> Conduit seq m seq
 filterCE = undefined
+{-# INLINE filterCE #-}
 
 mapWhileC :: Monad m => (a -> Maybe b) -> Conduit a m b
-mapWhileC f = awaitForever $ \r yield x -> maybe (left r) (yield r) (f x)
+mapWhileC f = awaitForever $ \x -> case f x of Just y -> return y; _ -> abort
+{-# INLINE mapWhileC #-}
 
 conduitVector :: (MonadBase base m, Vector v a, PrimMonad base)
               => Int -> Conduit a m (v a)
@@ -761,8 +784,7 @@ intersperseC :: Monad m => a -> Source m a -> Source m a
 intersperseC s (Source await) = Source $ \z yield -> EitherT $ do
     eres <- runEitherT $ await (Nothing, z) $ \(my, r) x ->
         case my of
-            Nothing ->
-                return (Just x, r)
+            Nothing -> return (Just x, r)
             Just y  -> do
                 r' <- rewrap (Nothing,) $ yield r y
                 rewrap (Just x,) $ yield (snd r') s
@@ -790,11 +812,12 @@ decodeBase16C :: Monad m => Conduit ByteString m ByteString
 decodeBase16C = undefined
 
 mapMC :: Monad m => (a -> m b) -> Conduit a m b
-mapMC f = awaitForever $ \r yield x -> yield r =<< lift (f x)
+mapMC f src = src >>= lift . f
 {-# INLINE mapMC #-}
 
 mapMCE :: (Monad m, Traversable f) => (a -> m b) -> Conduit (f a) m (f b)
 mapMCE = undefined
+{-# INLINE mapMCE #-}
 
 omapMCE :: (Monad m, MonoTraversable mono)
         => (Element mono -> m (Element mono)) -> Conduit mono m mono
@@ -802,14 +825,15 @@ omapMCE = undefined
 
 concatMapMC :: (Monad m, MonoFoldable mono)
             => (a -> m mono) -> Conduit a m (Element mono)
-concatMapMC = undefined
+concatMapMC f = awaitForever $ yieldMany <=< lift . f
 
 filterMC :: Monad m => (a -> m Bool) -> Conduit a m a
-filterMC f = awaitForever $ \r yield x -> do
+filterMC f = awaitForever $ \x -> do
     res <- lift $ f x
     if res
-        then yield r x
-        else return r
+        then return x
+        else skip
+{-# INLINE filterMC #-}
 
 filterMCE :: (Monad m, IsSequence seq)
           => (Element seq -> m Bool) -> Conduit seq m seq
@@ -827,6 +851,7 @@ concatMapAccumMC = undefined
 
 encodeUtf8C :: (Monad m, Utf8 text binary) => Conduit text m binary
 encodeUtf8C = mapC encodeUtf8
+{-# INLINE encodeUtf8C #-}
 
 decodeUtf8C :: MonadThrow m => Conduit ByteString m Text
 decodeUtf8C = undefined
@@ -841,11 +866,13 @@ lineAsciiC = undefined
 
 unlinesC :: (Monad m, IsSequence seq, Element seq ~ Char)
          => Conduit seq m seq
-unlinesC = concatMapC (:[Seq.singleton '\n'])
+unlinesC = concatMapC (: [Seq.singleton '\n'])
+{-# INLINE unlinesC #-}
 
 unlinesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
               => Conduit seq m seq
-unlinesAsciiC = concatMapC (:[Seq.singleton 10])
+unlinesAsciiC = concatMapC (: [Seq.singleton 10])
+{-# INLINE unlinesAsciiC #-}
 
 linesUnboundedC_ :: forall m seq. (Monad m, IsSequence seq, Eq (Element seq))
                  => Element seq -> Conduit seq m seq
@@ -874,14 +901,16 @@ linesUnboundedC_ sep (Source await) = Source $ \z yield -> EitherT $ do
 linesUnboundedC :: (Monad m, IsSequence seq, Element seq ~ Char)
                 => Conduit seq m seq
 linesUnboundedC = linesUnboundedC_ '\n'
+{-# INLINE linesUnboundedC #-}
 
 linesUnboundedAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
                      => Conduit seq m seq
 linesUnboundedAsciiC = linesUnboundedC_ 10
+{-# INLINE linesUnboundedAsciiC #-}
 
 -- | Zip sinks together.  This function may be used multiple times:
 --
--- >>> let mySink s await = resolve await () $ \() x -> liftIO $ print $ s <> show x
+-- >>> let mySink s = sink () $ \() x -> liftIO $ print $ s <> show x
 -- >>> zipSinks sinkList (zipSinks (mySink "foo") (mySink "bar")) $ yieldMany [1,2,3]
 -- "foo: 1"
 -- "bar: 1"
@@ -948,10 +977,12 @@ instance Monad m => Applicative (ZipSink a m) where
 -- Implemented on top of @ZipSink@, see that data type for more details.
 sequenceSinks :: (Traversable f, Monad m) => f (Sink a m r) -> Sink a m (f r)
 sequenceSinks = getZipSink . sequenceA . fmap ZipSink
+{-# INLINE sequenceSinks #-}
 
 asyncC :: (MonadBaseControl IO m, Monad m)
        => (a -> m b) -> Conduit a m (Async (StM m b))
-asyncC f = awaitForever $ \r yield x -> yield r =<< lift (async (f x))
+asyncC f = awaitForever $ lift . async . f
+{-# INLINE asyncC #-}
 
 -- | Convert a 'Control.Foldl.FoldM' fold abstraction into a Sink.
 --
@@ -960,8 +991,10 @@ asyncC f = awaitForever $ \r yield x -> yield r =<< lift (async (f x))
 -- >>> fromFoldM (FoldM ((return .) . (+)) (return 0) return) $ yieldMany [1..10]
 -- 55
 fromFoldM :: Monad m => FoldM m a b -> Source m a -> m b
-fromFoldM (FoldM step initial final) (Source await) =
-    initial >>= flip (resolve await) ((lift .) . step) >>= final
+fromFoldM (FoldM step initial final) src = do
+    r <- initial
+    final =<< sink r ((lift .) . step) src
+{-# INLINE fromFoldM #-}
 
 -- | Convert a Sink into a 'Control.Foldl.FoldM', passing it into a
 --   continuation.
@@ -970,7 +1003,8 @@ fromFoldM (FoldM step initial final) (Source await) =
 -- 55
 toFoldM :: Monad m
         => Sink a m r -> (forall s. FoldM (EitherT s m) a s -> EitherT s m s) -> m r
-toFoldM s f = s $ Source $ \k yield -> f $ FoldM yield (return k) return
+toFoldM s f = s $ source $ \k yield -> f $ FoldM yield (return k) return
+{-# INLINE toFoldM #-}
 
 sourceSTM :: forall container a. (container a -> STM a)
           -> (container a -> STM Bool)
@@ -992,12 +1026,15 @@ sourceSTM reader tester chan = Source go
 -- | A Source for exhausting a TChan, but blocks if it is initially empty.
 sourceTChan :: forall a. TChan a -> Source STM a
 sourceTChan = sourceSTM readTChan isEmptyTChan
+{-# INLINE sourceTChan #-}
 
 sourceTQueue :: forall a. TQueue a -> Source STM a
 sourceTQueue = sourceSTM readTQueue isEmptyTQueue
+{-# INLINE sourceTQueue #-}
 
 sourceTBQueue :: forall a. TBQueue a -> Source STM a
 sourceTBQueue = sourceSTM readTBQueue isEmptyTBQueue
+{-# INLINE sourceTBQueue #-}
 
 untilMC :: forall m a. Monad m => m a -> m Bool -> Source m a
 untilMC m f = Source go

@@ -1,5 +1,5 @@
 Name:                simple-conduit
-Version:             0.3.0
+Version:             0.4.0
 Synopsis:            A simple streaming library based on composing monadic folds.
 Description:
     @simple-conduit@ follows a similar UI to the more capable @conduit@ library, but reduces the scope of what it can solve donw to what can be expressed by chaining monadic folds that allow for early termination.  This allows for more predictable resource management behavior, at the cost of not allowing scenarios that @conduit@ is better designed.
@@ -31,6 +31,7 @@ Library
                      , mtl
                      , mwc-random
                      , primitive
+                     , semigroups
                      , stm
                      , streaming-commons
                      , text

@@ -3,7 +3,7 @@
 , either, bifunctors, chunkedData, monoTraversable, text, foldl
 
 , primitive, streamingCommons, vector, filepath, mwcRandom
-, liftedAsync, stm
+, liftedAsync, stm, semigroups
 
 , conduit, conduitExtra, conduitCombinators
 }:

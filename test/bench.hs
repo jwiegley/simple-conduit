@@ -59,6 +59,5 @@ yieldMany2 xs = Source $ \z yield -> foldM yield z xs
 {-# INLINE yieldMany2 #-}
 
 sinkList2 :: Monad m => Sink a m [a]
-sinkList2 (Source await) =
-    liftM ($ []) $ resolve await id $ \r x -> return (r . (x:))
+sinkList2 = liftM (liftM ($ [])) $ sink id $ \r x -> return (r . (x:))
 {-# INLINE sinkList2 #-}

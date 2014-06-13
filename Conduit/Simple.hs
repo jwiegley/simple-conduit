@@ -17,47 +17,55 @@
 
 module Conduit.Simple where
 
-import           Control.Applicative
-import           Control.Concurrent hiding (yield)
-import           Control.Concurrent.Async.Lifted
+import           Control.Applicative (Alternative((<|>), empty),
+                                      Applicative((<*>), pure), (<$>))
+import           Control.Concurrent (MVar, takeMVar, putMVar, newEmptyMVar)
+import           Control.Concurrent.Async.Lifted (Async, withAsync, waitBoth,
+                                                  async)
 import           Control.Concurrent.STM
-import           Control.Exception.Lifted
-import           Control.Foldl
-import           Control.Monad hiding (mapM)
-import           Control.Monad.Base
-import           Control.Monad.Catch hiding (bracket, catch, mask,
-                                             uninterruptibleMask)
+import           Control.Exception.Lifted (bracket)
+import           Control.Foldl (PrimMonad, Vector, FoldM(..))
+import           Control.Monad (liftM, MonadPlus(..), ap, (<=<))
+import           Control.Monad.Base (MonadBase(..))
+import           Control.Monad.Catch (MonadThrow(..), MonadMask, MonadCatch)
 import qualified Control.Monad.Catch as Catch
-import           Control.Monad.Error.Class
-import           Control.Monad.IO.Class
-import           Control.Monad.Morph
-import           Control.Monad.Primitive
-import           Control.Monad.Reader.Class
-import           Control.Monad.State.Class
-import           Control.Monad.Trans.Control
-import           Control.Monad.Trans.Either
-import           Control.Monad.Writer.Class
-import           Data.Bifunctor
-import           Data.Builder
-import           Data.ByteString hiding (hPut, putStrLn)
-import           Data.Foldable
-import           Data.Functor.Identity
-import           Data.IOData
+import           Control.Monad.Error.Class (MonadError(..))
+import           Control.Monad.IO.Class (MonadIO(..))
+import           Control.Monad.Morph (MonadTrans(..), MMonad(..), MFunctor(..))
+import           Control.Monad.Primitive (PrimMonad(PrimState))
+import           Control.Monad.Reader.Class (MonadReader(..))
+import           Control.Monad.State.Class (MonadState(..))
+import           Control.Monad.Trans.Control (MonadBaseControl(StM))
+import           Control.Monad.Trans.Either (EitherT(..), left)
+import           Control.Monad.Writer.Class (MonadWriter(..))
+import           Data.Bifunctor (Bifunctor(bimap))
+import           Data.Builder (Builder(builderToLazy), ToBuilder(..))
+import           Data.ByteString (ByteString)
+import           Data.Foldable (Foldable(foldMap))
+import           Data.Functor.Identity (Identity(runIdentity))
+import           Data.IOData (IOData(hGetChunk, hPut))
 import           Data.List (unfoldr)
-import           Data.MonoTraversable
-import           Data.NonNull as NonNull
-import           Data.Semigroup
-import           Data.Sequences as Seq
-import           Data.Sequences.Lazy
+import           Data.MonoTraversable (MonoTraversable, MonoFunctor, Element,
+                                       MonoFoldable(oall, oany, ofoldMap,
+                                                    ofoldl', ofoldlM, olength,
+                                                    onull))
+import           Data.NonNull as NonNull (NonNull, fromNullable)
+import           Data.Semigroup (Any(..), All(..), Monoid(..), Semigroup((<>)))
+import           Data.Sequences as Seq (OrdSequence, EqSequence(elem, notElem),
+                                        SemiSequence(Index), singleton,
+                                        IsSequence(break, drop, dropWhile,
+                                                   fromList, splitAt))
+import           Data.Sequences.Lazy (LazySequence(fromChunks, toChunks))
 import qualified Data.Streaming.Filesystem as F
-import           Data.Text
-import           Data.Textual.Encoding
-import           Data.Traversable
-import           Data.Word
-import           Prelude hiding (mapM)
+import           Data.Text (Text)
+import           Data.Textual.Encoding (Utf8(encodeUtf8))
+import           Data.Traversable (Traversable(sequenceA))
+import           Data.Word (Word8)
 import           System.FilePath ((</>))
-import           System.IO
-import           System.Random.MWC as MWC
+import           System.IO (stdout, stdin, stderr, openFile, hClose,
+                            Handle, IOMode(ReadMode, WriteMode))
+import           System.Random.MWC as MWC (Gen, Variate(uniform),
+                                           createSystemRandom)
 
 -- | The type of Source should recall 'foldM':
 --

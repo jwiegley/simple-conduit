@@ -3,7 +3,9 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | Please see the project README for more details:
 --
@@ -23,19 +25,24 @@ import           Control.Exception.Lifted
 import           Control.Foldl
 import           Control.Monad hiding (mapM)
 import           Control.Monad.Base
-import           Control.Monad.Catch hiding (bracket, catch)
+import           Control.Monad.Catch hiding (bracket, catch, mask,
+                                             uninterruptibleMask)
+import qualified Control.Monad.Catch as Catch
+import           Control.Monad.Error.Class
 import           Control.Monad.IO.Class
 import           Control.Monad.Morph
 import           Control.Monad.Primitive
+import           Control.Monad.Reader.Class
+import           Control.Monad.State.Class
 import           Control.Monad.Trans.Control
 import           Control.Monad.Trans.Either
+import           Control.Monad.Writer.Class
 import           Data.Bifunctor
 import           Data.Builder
 import           Data.ByteString hiding (hPut, putStrLn)
 import           Data.Foldable
 import           Data.Functor.Identity
 import           Data.IOData
-
 import           Data.List (unfoldr)
 import           Data.MonoTraversable
 import           Data.NonNull as NonNull
@@ -101,7 +108,7 @@ import           System.Random.MWC as MWC
 -- >>> sinkList $ yieldMany [1..3] <> yieldMany [4..6]
 -- [1,2,3,4,5,6]
 newtype Source m a = Source
-    { getSource :: forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r }
+    { runSource :: forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r }
 
 type Conduit a m b = Source m a -> Source m b
 type Sink a m r    = Source m a -> m r
@@ -144,8 +151,16 @@ instance Monad (Source m) where
     return x = Source $ \z yield -> yield z x
     {-# INLINE return #-}
     Source await >>= f = Source $ \z yield ->
-        await z $ \r x -> getSource (f x) r yield
+        await z $ \r x -> runSource (f x) r yield
     {-# INLINE (>>=) #-}
+
+instance MFunctor Source where
+    hoist nat m = Source $ \z yield -> runSource (hoist nat m) z yield
+    {-# INLINE hoist #-}
+
+instance MMonad Source where
+    embed f m = Source $ \z yield -> runSource (embed f m) z yield
+    {-# INLINE embed #-}
 
 instance MonadIO m => MonadIO (Source m) where
     liftIO m = Source $ \z yield -> yield z =<< liftIO m
@@ -155,9 +170,64 @@ instance MonadTrans Source where
     lift m = Source $ \z yield -> yield z =<< lift m
     {-# INLINE lift #-}
 
+instance MonadReader r m => MonadReader r (Source m) where
+    ask     = lift ask
+    {-# INLINE ask #-}
+    local f = conduit $ \r yield -> local f . yield r
+    {-# INLINE local #-}
+    reader  = lift . reader
+    {-# INLINE reader #-}
+
+instance MonadState s m => MonadState s (Source m) where
+    get   = lift get
+    {-# INLINE get #-}
+    put   = lift . put
+    {-# INLINE put #-}
+    state = lift . state
+    {-# INLINE state #-}
+
+instance MonadWriter w m => MonadWriter w (Source m) where
+    writer = lift . writer
+    {-# INLINE writer #-}
+    tell = lift . tell
+    {-# INLINE tell #-}
+    listen = conduit $ \r yield x -> do
+        ((), w) <- listen $ return ()
+        yield r (x, w)
+    {-# INLINE listen #-}
+    pass = conduit $ \r yield (x, f) -> do
+        pass $ return (x, f)
+        yield r x
+    {-# INLINE pass #-}
+
+instance MonadError e m => MonadError e (Source m) where
+    throwError = lift . throwError
+    {-# INLINE throwError #-}
+    catchError src f = Source $ \z yield -> EitherT $
+        runEitherT (runSource src z yield)
+            `catchError` \e -> runEitherT (runSource (f e) z yield)
+    {-# INLINE catchError #-}
+
 instance MonadThrow m => MonadThrow (Source m) where
-    throwM e = Source $ \_ _ -> throwM e
+    throwM e = lift $ throwM e
     {-# INLINE throwM #-}
+
+instance MonadCatch m => MonadCatch (Source m) where
+    catch src f = Source $ \z yield -> EitherT $
+        runEitherT (runSource src z yield)
+            `Catch.catch` \e -> runEitherT (runSource (f e) z yield)
+    {-# INLINE catch #-}
+
+instance MonadMask m => MonadMask (Source m) where
+    mask a = Source $ \z yield -> EitherT $ Catch.mask $ \u ->
+        runEitherT $ runSource (a $ \b -> Source $ \r yield' ->
+            EitherT $ liftM Right $ u $ sink r yield' b) z yield
+    {-# INLINE mask #-}
+    uninterruptibleMask a =
+        Source $ \z yield -> EitherT $ Catch.uninterruptibleMask $ \u ->
+            runEitherT $ runSource (a $ \b -> Source $ \r yield' ->
+                EitherT $ liftM Right $ u $ sink r yield' b) z yield
+    {-# INLINE uninterruptibleMask #-}
 
 instance Foldable (Source Identity) where
     foldMap f = runIdentity . sink mempty (\r x -> return $ r `mappend` f x)
@@ -327,14 +397,14 @@ sourceFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
            => FilePath -> Source m a
 sourceFile path = Source $ \z yield ->
     bracket (liftIO $ openFile path ReadMode) (liftIO . hClose)
-        (\h -> getSource (sourceHandle h) z yield)
+        (\h -> runSource (sourceHandle h) z yield)
 {-# INLINE sourceFile #-}
 
 sourceIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
                => IO Handle -> Source m a
 sourceIOHandle f = Source $ \z yield ->
     bracket (liftIO f) (liftIO . hClose)
-        (\h -> getSource (sourceHandle h) z yield)
+        (\h -> runSource (sourceHandle h) z yield)
 {-# INLINE sourceIOHandle #-}
 
 stdinC :: (MonadBaseControl IO m, MonadIO m, IOData a) => Source m a
@@ -343,12 +413,12 @@ stdinC = sourceHandle stdin
 
 initRepeat :: Monad m => m seed -> (seed -> m a) -> Source m a
 initRepeat mseed f = Source $ \z yield ->
-    lift mseed >>= \seed -> getSource (repeatMC (f seed)) z yield
+    lift mseed >>= \seed -> runSource (repeatMC (f seed)) z yield
 {-# INLINE initRepeat #-}
 
 initReplicate :: Monad m => m seed -> (seed -> m a) -> Int -> Source m a
 initReplicate mseed f n = Source $ \z yield ->
-    lift mseed >>= \seed -> getSource (replicateMC n (f seed)) z yield
+    lift mseed >>= \seed -> runSource (replicateMC n (f seed)) z yield
 {-# INLINE initReplicate #-}
 
 sourceRandom :: (Variate a, MonadIO m) => Source m a
@@ -395,7 +465,7 @@ sourceDirectoryDeep followSymlinks startDir = Source go
     go :: r -> (r -> FilePath -> EitherT r m r) -> EitherT r m r
     go z yield = start startDir z
       where
-        start dir r = getSource (sourceDirectory dir) r entry
+        start dir r = runSource (sourceDirectory dir) r entry
         entry r fp = do
             ft <- liftIO $ F.getFileType fp
             case ft of
@@ -1010,13 +1080,13 @@ sourceSTM :: forall container a. (container a -> STM a)
           -> (container a -> STM Bool)
           -> container a
           -> Source STM a
-sourceSTM reader tester chan = Source go
+sourceSTM getter tester chan = Source go
   where
     go :: r -> (r -> a -> EitherT r STM r) -> EitherT r STM r
     go z yield = loop z
       where
         loop r = do
-            x  <- lift $ reader chan
+            x  <- lift $ getter chan
             r' <- yield r x
             mt <- lift $ tester chan
             if mt

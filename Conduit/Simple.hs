@@ -15,7 +15,148 @@
 --
 --   https://www.newartisans.com/2014/06/simpler-conduit-library
 
-module Conduit.Simple where
+module Conduit.Simple
+    ( Source(..), Conduit, Sink
+    , sequenceSources
+    , ZipSink(..), sequenceSinks
+    , source, conduit, conduitWith, sink
+    , ($=), (=$), ($$)
+    , returnC, abort, skip, awaitForever
+    , yieldMany, sourceList
+    , unfoldC
+    , enumFromToC
+    , iterateC
+    , repeatC
+    , replicateC
+    , sourceLazy
+    , repeatMC
+    , repeatWhileMC
+    , replicateMC
+    , sourceHandle
+    , sourceFile
+    , sourceIOHandle
+    , stdinC
+    , initRepeat
+    , initReplicate
+    , sourceRandom
+    , sourceRandomN
+    , sourceRandomGen
+    , sourceRandomNGen
+    , sourceDirectory
+    , sourceDirectoryDeep
+    , dropC
+    , dropCE
+    , dropWhileC
+    , dropWhileCE
+    , foldC
+    , foldCE
+    , foldlC
+    , foldlCE
+    , foldMapC
+    , foldMapCE
+    , allC
+    , allCE
+    , anyC
+    , anyCE
+    , andC
+    , andCE
+    , orC
+    , orCE
+    , elemC
+    , elemCE
+    , notElemC
+    , notElemCE
+    , sinkLazy
+    , sinkList
+    , sinkVector
+    , sinkVectorN
+    , sinkBuilder
+    , sinkLazyBuilder
+    , sinkNull
+    , awaitNonNull
+    , headCE
+    , lastC
+    , lastCE
+    , lengthC
+    , lengthCE
+    , lengthIfC
+    , lengthIfCE
+    , maximumC
+    , maximumCE
+    , minimumC
+    , minimumCE
+    , sumC
+    , sumCE
+    , productC
+    , productCE
+    , findC
+    , mapM_C
+    , mapM_CE
+    , foldMC
+    , foldMCE
+    , foldMapMC
+    , foldMapMCE
+    , sinkFile
+    , sinkHandle
+    , sinkIOHandle
+    , printC
+    , stdoutC
+    , stderrC
+    , mapC
+    , mapCE
+    , omapCE
+    , concatMapC
+    , concatMapCE
+    , takeC
+    , takeCE
+    , takeWhileC
+    , takeWhileCE
+    , takeExactlyC
+    , takeExactlyCE
+    , concatC
+    , filterC
+    , filterCE
+    , mapWhileC
+    , conduitVector
+    , scanlC
+    , concatMapAccumC
+    , intersperseC
+    , encodeBase64C
+    , decodeBase64C
+    , encodeBase64URLC
+    , decodeBase64URLC
+    , encodeBase16C
+    , decodeBase16C
+    , mapMC
+    , mapMCE
+    , omapMCE
+    , concatMapMC
+    , filterMC
+    , filterMCE
+    , iterMC
+    , scanlMC
+    , concatMapAccumMC
+    , encodeUtf8C
+    , decodeUtf8C
+    , lineC
+    , lineAsciiC
+    , unlinesC
+    , unlinesAsciiC
+    , linesUnboundedC_
+    , linesUnboundedC
+    , linesUnboundedAsciiC
+    , zipSinks
+    , sourceMaybeMVar
+    , sourceMaybeTMVar
+    , asyncC
+    , fromFoldM
+    , toFoldM
+    , sourceTChan
+    , sourceTQueue
+    , sourceTBQueue
+    , untilMC
+    , whileMC
+    ) where
 
 import           Control.Applicative (Alternative((<|>), empty),
                                       Applicative((<*>), pure), (<$>))
@@ -204,7 +345,7 @@ instance MonadWriter w m => MonadWriter w (Source m) where
         yield r (x, w)
     {-# INLINE listen #-}
     pass = conduit $ \r yield (x, f) -> do
-        pass $ return (x, f)
+        pass $ return ((), f)
         yield r x
     {-# INLINE pass #-}
 

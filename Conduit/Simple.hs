@@ -1,8 +1,6 @@
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -187,8 +185,6 @@ import           Data.Bifunctor (Bifunctor(bimap))
 import           Data.Builder (Builder(builderToLazy), ToBuilder(..))
 import           Data.ByteString (ByteString)
 import           Data.Foldable (Foldable(foldMap))
-import           Data.Functor.Contravariant
-import           Data.Functor.Contravariant.Compose
 import           Data.Functor.Identity (Identity(runIdentity))
 import           Data.IOData (IOData(hGetChunk, hPut))
 import           Data.List (unfoldr)
@@ -229,187 +225,10 @@ m [] is isomorphic to
 ContT r (ReaderT r m) a
 -}
 
+-- | This is a simpler type of 'Cont'.  We cannot use the mtl version which
+--   aliases to 'ContT' over 'Identity', because it places the 'r' underneath
+--   Identity.
 type Cont r a = (a -> r) -> r
-
-{-
-type Fold r a = Cont (r -> r) a
-
-newtype Algebra f r = Algebra (f r -> r)
-
-type AlgCont r a = Algebra ((->) a) r
-type AlgFold r a = Algebra ((->) a) (r -> r)
-
--- | CollectT is a function that turns a "seed" and a value into a result of
---   the same type as the seed.  It is
---   'Data.Functor.Contravariant.Contravariant' over the value.
-newtype CollectT r m a = CollectT (r -> a -> m r)
-
-instance Contravariant (CollectT r m) where
-    contramap f (CollectT k) = CollectT ((. f) . k)
-    {-# INLINE contramap #-}
-
--- | Every Nested contravariant functor is a covariant 'Functor'.
-type Nested f a = Compose f f a
-
--- | A 'FoldT' is a collector of collectors, or a variant of 'ContT' that
---   accepts an initial "seed".  Without this seed, it would be identical to
---   'ContT'.
-newtype FoldT r m a = FoldT (Nested (CollectT r m) a) deriving Functor
-
--- | Create a 'FoldT', or encapsulated monadic fold.  The arguments are the
---   initial seed and the function to call for each value consumed by the
---   field.  These are typically called 'z' (for "zero", or the recursion base
---   case) and 'c' (for "collect") in the code below; 'c' is also called
---   'yield' when the 'Source' type-wrapper is involved.
---
--- >>> evalFoldT $ source $ \z yield -> yield z () :: Identity ()
--- Identity ()
-folding :: (r -> (r -> a -> m r) -> m r) -> FoldT r m a
-folding f = FoldT . Compose . CollectT $ \r (CollectT c) -> f r c
-
--- | Run a 'FoldT' to completion.  Where this function is used in the code
---   parameters, the parameters in the lambda-expression passed as the third
---   argument are usually called 'r' (the fold, or "recursion" variable) and
---   'x' (the value to be considered).
---
--- >>> let src = source $ \z yield -> yield z ()
--- >>> runSource src 10 $ \r x -> case x of () -> return r :: Identity Int
--- Identity 10
-runFoldT :: FoldT r m a -> r -> (r -> a -> m r) -> m r
-runFoldT (FoldT (Compose (CollectT gen))) z c = gen z (CollectT c)
-
--- | 'evalFoldT' is a special case of runSource, where the fold variable is a
---   Monoid, and the base value is 'mempty'.
-evalFoldT :: (Monad m, Monoid r) => FoldT r m r -> m r
-evalFoldT m = runSource m mempty ((return .) . mappend)
-
-instance Monad m => Semigroup (FoldT r m a) where
-    x <> y = source $ \r c -> runSource x r c >>= \r' -> runSource y r' c
-    {-# INLINE (<>) #-}
-
-instance Monad m => Monoid (FoldT r m a) where
-    mempty  = source $ const . return
-    {-# INLINE mempty #-}
-    mappend = (<>)
-    {-# INLINE mappend #-}
-
-instance Monad m => Alternative (FoldT r m) where
-    empty = mempty
-    {-# INLINE empty #-}
-    (<|>) = (<>)
-    {-# INLINE (<|>) #-}
-
-instance Monad m => MonadPlus (FoldT r m) where
-    mzero = mempty
-    {-# INLINE mzero #-}
-    mplus = (<|>)
-    {-# INLINE mplus #-}
-
-instance Applicative (FoldT r m) where
-    pure x  = source $ \r c -> c r x
-    f <*> v = source $ \z c -> runSource f z $ \r g -> runSource v r $ \s -> c s . g
-
-instance Monad (FoldT r m) where
-    return  = pure
-    m >>= k = source $ \z c -> runSource m z (\r x -> runSource (k x) r c)
-
-instance MFunctor (FoldT r) where
-    hoist nat m = source $ runSource (hoist nat m)
-    {-# INLINE hoist #-}
-
-instance MMonad (FoldT r) where
-    embed f m = source $ runSource (embed f m)
-    {-# INLINE embed #-}
-
-instance (MonadIO m) => MonadIO (FoldT r m) where
-    liftIO = lift . liftIO
-
-instance MonadTrans (FoldT r) where
-    lift m = source $ \r c -> m >>= c r
-
-instance (Functor f, MonadFree f m) => MonadFree f (FoldT r m) where
-    wrap t = source (\r h -> wrap (fmap (\p -> runSource p r h) t))
-    {-# INLINE wrap #-}
-
-instance MonadReader r m => MonadReader r (FoldT r' m) where
-    ask     = lift ask
-    {-# INLINE ask #-}
-    local f = withFoldT $ \r c -> local f . c r
-    {-# INLINE local #-}
-    reader  = lift . reader
-    {-# INLINE reader #-}
-
-instance MonadState s m => MonadState s (FoldT r' m) where
-    get   = lift get
-    {-# INLINE get #-}
-    put   = lift . put
-    {-# INLINE put #-}
-    state = lift . state
-    {-# INLINE state #-}
-
-instance MonadWriter w m => MonadWriter w (FoldT r' m) where
-    writer = lift . writer
-    {-# INLINE writer #-}
-    tell = lift . tell
-    {-# INLINE tell #-}
-    listen = withFoldT $ \r c x -> do
-        ((), w) <- listen $ return ()
-        c r (x, w)
-    {-# INLINE listen #-}
-    pass = withFoldT $ \r c (x, f) -> do
-        pass $ return ((), f)
-        c r x
-    {-# INLINE pass #-}
-
-instance MonadError e m => MonadError e (FoldT r m) where
-    throwError = lift . throwError
-    {-# INLINE throwError #-}
-    catchError src f = source $ \z c ->
-        runSource src z c `catchError` \e -> runSource (f e) z c
-    {-# INLINE catchError #-}
-
-instance MonadThrow m => MonadThrow (FoldT r m) where
-    throwM = lift . throwM
-    {-# INLINE throwM #-}
-
-instance MonadCatch m => MonadCatch (FoldT r m) where
-    catch src f = source $ \z c ->
-        runSource src z c `Catch.catch` \e -> runSource (f e) z c
-    {-# INLINE catch #-}
-
-instance MonadMask m => MonadMask (FoldT r m) where
-    mask a = source $ \z c -> Catch.mask $ \u ->
-        runSource (a $ \b -> source $ \r c' -> u $ runSource b r c') z c
-    {-# INLINE mask #-}
-    uninterruptibleMask a =
-        source $ \z c -> Catch.uninterruptibleMask $ \u ->
-            runSource (a $ \b -> source $ \r c' -> u $ runSource b r c') z c
-    {-# INLINE uninterruptibleMask #-}
-
-mapFoldT :: (m r -> m r) -> FoldT r m a -> FoldT r m a
-mapFoldT f gen = source $ (f .) . runSource gen
-
-withFoldT :: (r -> (r -> b -> m r) -> a -> m r) -> FoldT r m a -> FoldT r m b
-withFoldT f gen = source $ \z c -> runSource gen z (flip f c)
-
-foldCallCC :: ((a -> FoldT r m b) -> FoldT r m a) -> FoldT r m a
-foldCallCC f = source $ \z c -> runSource (f (\x -> source $ \r _ -> c r x)) z c
-
--- | @'foldResetT' m@ delimits the continuation of any 'foldShiftT' inside @m@.
---
--- * @'foldResetT' ('lift' m) = 'lift' m@
---
-foldResetT :: (Monad m, Monoid r) => FoldT r m r -> FoldT r' m r
-foldResetT = lift . evalFoldT
-
--- | @'foldShiftT' f@ captures the continuation up to the nearest enclosing
--- 'foldResetT' and passes it to @f@:
---
--- * @'foldResetT' ('foldShiftT' f >>= k) = 'foldResetT' (f ('evalFoldT' . k))@
---
-foldShiftT :: (Monad m, Monoid r) => ((a -> m r) -> FoldT r m r) -> FoldT r m a
-foldShiftT f = source $ \z c -> evalFoldT . f $ c z
--}
 
 -- | A Source is a short-circuiting monadic fold.
 --
@@ -452,8 +271,7 @@ foldShiftT f = source $ \z c -> evalFoldT . f $ c z
 --
 -- >>> sinkList $ yieldMany [1..3] <> yieldMany [4..6]
 -- [1,2,3,4,5,6]
--- newtype Source m a = Source { getSource :: forall r. Cont (r -> EitherT r m r) a }
-newtype Source m a = Source { getSource :: forall r. Cont (r -> m r) a }
+newtype Source m a = Source { getSource :: forall r. Cont (r -> EitherT r m r) a }
     deriving Functor
 
 -- | A 'Conduit' is a "Source homomorphism", or simple a mapping between
@@ -520,11 +338,10 @@ instance (Functor f, MonadFree f m) => MonadFree f (Source m) where
     wrap t = source $ \r h -> wrap $ fmap (\p -> runSource p r h) t
     {-# INLINE wrap #-}
 
-{-
 instance MonadReader r m => MonadReader r (Source m) where
     ask = lift ask
     {-# INLINE ask #-}
-    local f (Source m) = Source $ local f m
+    local f = conduit $ \r yield -> local f . yield r
     {-# INLINE local #-}
     reader = lift . reader
     {-# INLINE reader #-}
@@ -542,11 +359,14 @@ instance MonadWriter w m => MonadWriter w (Source m) where
     {-# INLINE writer #-}
     tell = lift . tell
     {-# INLINE tell #-}
-    listen (Source m) = Source $ listen m
+    listen = conduit $ \r yield x -> do
+        ((), w) <- listen $ return ()
+        yield r (x, w)
     {-# INLINE listen #-}
-    pass (Source m) = Source $ pass m
+    pass = conduit $ \r yield (x, f) -> do
+        pass $ return ((), f)
+        yield r x
     {-# INLINE pass #-}
--}
 
 instance MonadError e m => MonadError e (Source m) where
     throwError = lift . throwError
@@ -635,7 +455,6 @@ skip :: Monad m => Source m a
 skip = source $ const . return
 {-# INLINE skip #-}
 
-{-
 source :: (forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r)
        -> Source m a
 source await = Source $ \yield z -> await z (flip yield)
@@ -647,20 +466,7 @@ runSource (Source src) z yield = src (flip yield) z
 
 conduit :: (forall r. r -> (r -> b -> EitherT r m r) -> a -> EitherT r m r)
         -> Conduit a m b
-conduit f src = source $ \z c -> runSource src z (flip f c)
-{-# INLINE conduit #-}
--}
-
-source :: (forall r. r -> (r -> a -> m r) -> m r) -> Source m a
-source await = Source $ \yield z -> await z (flip yield)
-{-# INLINE source #-}
-
-runSource :: Source m a -> r -> (r -> a -> m r) -> m r
-runSource (Source src) z yield = src (flip yield) z
-{-# INLINE runSource #-}
-
-conduit :: (forall r. r -> (r -> b -> m r) -> a -> m r) -> Conduit a m b
-conduit f src = source $ \z c -> runSource src z (flip f c)
+conduit f src = source $ \z c -> runSource src z (`f` c)
 {-# INLINE conduit #-}
 
 -- | Most of the time conduits pass the fold variable through unmolested, but
@@ -678,36 +484,12 @@ conduitWith s f src = source $ \z yield ->
         f (r, t) (\r' -> rewrap (, t) . yield r')
 {-# INLINE conduitWith #-}
 
-{-
-foldWith :: Monad m
-         => s
-         -> (forall r. (r, s) -> (r -> b -> m (r, s)) -> a -> m (r, s))
-         -> FoldT (r, s) m a -> FoldT r m b
-foldWith s f src = source $ \z yield ->
-    liftM fst $ runSource src (z, s) $ \(r, t) ->
-        f (r, t) (\r' -> liftM (, t) . yield r')
-{-# INLINE foldWith #-}
-
-foldWith' :: Monad m
-         => s
-         -> (forall r. (r, s) -> (r -> b -> EitherT (r, s) m (r, s)) -> a -> EitherT (r, s) m (r, s))
-         -> FoldT (r, s) (EitherT (r, s) m) a -> FoldT r (EitherT r m) b
-foldWith' s f src = source $ \z yield ->
-    rewrap fst $ runSource src (z, s) $ \(r, t) ->
-        f (r, t) (\r' -> rewrap (, t) . yield r')
-{-# INLINE foldWith' #-}
--}
-
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
 rewrap f k = EitherT $ bimap f f `liftM` runEitherT k
 {-# INLINE rewrap #-}
 
--- sink :: forall m a r. Monad m => r -> (r -> a -> EitherT r m r) -> Sink a m r
--- sink z f src = either id id `liftM` runEitherT (runSource src z f)
--- {-# INLINE sink #-}
-
-sink :: forall m a r. Monad m => r -> (r -> a -> m r) -> Sink a m r
-sink z f src = runSource src z f
+sink :: forall m a r. Monad m => r -> (r -> a -> EitherT r m r) -> Sink a m r
+sink z f src = either id id `liftM` runEitherT (runSource src z f)
 {-# INLINE sink #-}
 
 yieldMany :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)

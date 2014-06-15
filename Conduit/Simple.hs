@@ -146,7 +146,7 @@ module Conduit.Simple
     , linesUnboundedC_
     , linesUnboundedC, linesC
     , linesUnboundedAsciiC, linesAsciiC
-    , zipSinks
+    -- , zipSinks
     , sourceMaybeMVar
     , sourceMaybeTMVar
     , asyncC
@@ -161,9 +161,8 @@ module Conduit.Simple
 
 import           Control.Applicative (Alternative((<|>), empty),
                                       Applicative((<*>), pure), (<$>))
-import           Control.Concurrent (MVar, takeMVar, putMVar, newEmptyMVar)
-import           Control.Concurrent.Async.Lifted (Async, withAsync, waitBoth,
-                                                  async)
+import           Control.Concurrent (MVar, takeMVar)
+import           Control.Concurrent.Async.Lifted (Async, async)
 import           Control.Concurrent.STM
 import           Control.Exception.Lifted (bracket)
 import           Control.Foldl (PrimMonad, Vector, FoldM(..))
@@ -460,7 +459,7 @@ runSource (Source (ContT src)) z yield =
 {-# INLINE runSource #-}
 
 lowerSource :: (Monad m, Monoid a) => Source m a -> m a
-lowerSource src = unwrap id $ runSource src mempty ((return .) . mappend)
+lowerSource src = unwrap $ runSource src mempty ((return .) . mappend)
 {-# INLINE lowerSource #-}
 
 source :: (forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r) -> Source m a
@@ -488,8 +487,8 @@ conduitWith s f src = source $ \z yield ->
         f (r, t) (\r' -> rewrap (, t) . yield r')
 {-# INLINE conduitWith #-}
 
-unwrap :: Monad m => (a -> b) -> EitherT a m a -> m b
-unwrap f k = either f f `liftM` runEitherT k
+unwrap :: Monad m => EitherT a m a -> m a
+unwrap k = either id id `liftM` runEitherT k
 {-# INLINE unwrap #-}
 
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
@@ -1191,6 +1190,7 @@ linesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
 linesAsciiC = linesUnboundedAsciiC
 {-# INLINE linesAsciiC #-}
 
+{-
 -- | Zip sinks together.  This function may be used multiple times:
 --
 -- >>> let mySink s = sink () $ \() x -> liftIO $ print $ s <> show x
@@ -1205,19 +1205,23 @@ linesAsciiC = linesUnboundedAsciiC
 --
 -- Note that the two sinks are run concurrently, so beware of race conditions
 -- if they interact with the same resource.
-zipSinks :: forall a m r r'. (MonadBaseControl IO m, MonadIO m)
-         => Sink a m r -> Sink a m r' -> Sink a m (r, r')
+zipSinks :: MonadIO m => Sink a m r -> Sink a m r' -> Sink a m (r, r')
 zipSinks sink1 sink2 src = do
-    x <- liftIO newEmptyMVar
-    y <- liftIO newEmptyMVar
-    withAsync (sink1 $ sourceMaybeMVar x) $ \a ->
-        withAsync (sink2 $ sourceMaybeMVar y) $ \b -> do
-            _ <- runEitherT $ runSource src () $ \() val -> do
-                liftIO $ putMVar x (Just val)
-                liftIO $ putMVar y (Just val)
-            liftIO $ putMVar x Nothing
-            liftIO $ putMVar y Nothing
-            waitBoth a b
+    sref <- liftIO $ newIORef (error "no s")
+    rref <- liftIO $ newIORef (error "no r'")
+    r <- sink1 $ source $ \r1 yield1 -> do
+        r' <- lift $ sink2 $ source $ \r2 yield2 -> EitherT $ do
+            (s, s') <- unwrap $ runSource src (r1, r2) $ \(j, k) val -> do
+                j' <- rewrap (, k) $ yield1 j val
+                rewrap (fst j' ,) $ yield2 k val
+            liftIO $ writeIORef sref s
+            return $ Right s'
+        liftIO $ do
+            writeIORef rref r'
+            readIORef sref      -- oh noes! the skolems, they be escaping...
+    r' <- liftIO $ readIORef rref
+    return (r, r')
+-}
 
 -- | Keep taking from an @MVar (Maybe a)@ until it yields 'Nothing'.
 sourceMaybeMVar :: forall m a. MonadIO m => MVar (Maybe a) -> Source m a

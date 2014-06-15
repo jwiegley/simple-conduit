@@ -19,6 +19,7 @@ Library
                      , bytestring
                      , chunked-data
                      , containers
+                     , contravariant
                      , either
                      , exceptions
                      , filepath

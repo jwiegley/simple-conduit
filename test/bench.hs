@@ -55,7 +55,7 @@ main = do
     useThat xs = C.yieldMany xs C.$= C.mapC (+2) C.$$ C.sinkList
 
 yieldMany2 :: Monad m => [a] -> Source m a
-yieldMany2 xs = Source $ \z yield -> foldM yield z xs
+yieldMany2 xs = source $ \z yield -> foldM yield z xs
 {-# INLINE yieldMany2 #-}
 
 sinkList2 :: Monad m => Sink a m [a]

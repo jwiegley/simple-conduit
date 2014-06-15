@@ -1,10 +1,11 @@
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 -- | Please see the project README for more details:
@@ -171,11 +172,13 @@ import           Control.Monad.Base (MonadBase(..))
 import           Control.Monad.Catch (MonadThrow(..), MonadMask, MonadCatch)
 import qualified Control.Monad.Catch as Catch
 import           Control.Monad.Error.Class (MonadError(..))
+import           Control.Monad.Free
 import           Control.Monad.IO.Class (MonadIO(..))
 import           Control.Monad.Morph (MonadTrans(..), MMonad(..), MFunctor(..))
 import           Control.Monad.Primitive (PrimMonad(PrimState))
 import           Control.Monad.Reader.Class (MonadReader(..))
 import           Control.Monad.State.Class (MonadState(..))
+import           Control.Monad.Trans.Cont
 import           Control.Monad.Trans.Control (MonadBaseControl(StM))
 import           Control.Monad.Trans.Either (EitherT(..), left)
 import           Control.Monad.Writer.Class (MonadWriter(..))
@@ -258,25 +261,175 @@ import           System.Random.MWC as MWC (Gen, Variate(uniform),
 --
 -- >>> sinkList $ yieldMany [1..3] <> yieldMany [4..6]
 -- [1,2,3,4,5,6]
+
+-- | CollectT is a function that turns a "seed" and a value into a result of
+--   the same type as the seed.  It is
+--   'Data.Functor.Contravariant.Contravariant' over the value.
 newtype CollectT r m a = CollectT (r -> a -> m r)
 
 instance Contravariant (CollectT r m) where
     contramap f (CollectT k) = CollectT ((. f) . k)
     {-# INLINE contramap #-}
 
--- | A Nested contravariant functor is a 'Functor'.
+-- | Every Nested contravariant functor is a covariant 'Functor'.
 type Nested f a = Compose f f a
 
--- | A Generator is a collector of collectors.
-type GeneratorT r m a = Nested (CollectT r m) a
+-- | A 'FoldT' is a collector of collectors, or a variant of 'ContT' that
+--   accepts an initial "seed".  Without this seed, it would be identical to
+--   'ContT'.
+newtype FoldT r m a = FoldT (Nested (CollectT r m) a)
+    deriving Functor
 
-newtype Source m a = Source (forall r. GeneratorT r (EitherT r m) a)
+folding :: (r -> (r -> a -> m r) -> m r) -> FoldT r m a
+folding await =
+    FoldT . Compose . CollectT $ \r (CollectT yield) -> await r yield
+
+runFoldT :: FoldT r m a -> r -> (r -> a -> m r) -> m r
+runFoldT (FoldT (Compose (CollectT gen))) z yield =
+    gen z (CollectT yield)
+
+instance Monad m => Semigroup (FoldT r m a) where
+    x <> y = folding $ \r f ->
+        runFoldT x r f >>= \r' -> runFoldT y r' f
+    {-# INLINE (<>) #-}
+
+instance Monad m => Monoid (FoldT r m a) where
+    mempty  = folding $ const . return
+    {-# INLINE mempty #-}
+    mappend = (<>)
+    {-# INLINE mappend #-}
+
+instance Monad m => Alternative (FoldT r m) where
+    empty = mempty
+    {-# INLINE empty #-}
+    (<|>) = (<>)
+    {-# INLINE (<|>) #-}
+
+instance Monad m => MonadPlus (FoldT r m) where
+    mzero = mempty
+    {-# INLINE mzero #-}
+    mplus = (<|>)
+    {-# INLINE mplus #-}
+
+instance Applicative (FoldT r m) where
+    pure x  = folding (\r c -> c r x)
+    f <*> v = folding $ \z c ->
+        runFoldT f z $ \r g -> runFoldT v r $ \s -> c s . g
+
+instance Monad (FoldT r m) where
+    return  = pure
+    m >>= k = folding $ \z c ->
+        runFoldT m z (\r x -> runFoldT (k x) r c)
+
+instance MFunctor (FoldT r) where
+    hoist nat m = folding $ \z yield -> runFoldT (hoist nat m) z yield
+    {-# INLINE hoist #-}
+
+instance MMonad (FoldT r) where
+    embed f m = folding $ \z yield -> runFoldT (embed f m) z yield
+    {-# INLINE embed #-}
+
+instance (MonadIO m) => MonadIO (FoldT r m) where
+    liftIO = lift . liftIO
+
+instance MonadTrans (FoldT r) where
+    lift m = folding $ \r yield -> m >>= yield r
+
+instance (Functor f, MonadFree f m) => MonadFree f (FoldT r m) where
+    wrap t = folding (\r h -> wrap (fmap (\p -> runFoldT p r h) t))
+    {-# INLINE wrap #-}
+
+instance MonadReader r m => MonadReader r (FoldT r' m) where
+    ask     = lift ask
+    {-# INLINE ask #-}
+    local f = withFoldT $ \r yield -> local f . yield r
+    {-# INLINE local #-}
+    reader  = lift . reader
+    {-# INLINE reader #-}
+
+instance MonadState s m => MonadState s (FoldT r' m) where
+    get   = lift get
+    {-# INLINE get #-}
+    put   = lift . put
+    {-# INLINE put #-}
+    state = lift . state
+    {-# INLINE state #-}
+
+instance MonadWriter w m => MonadWriter w (FoldT r' m) where
+    writer = lift . writer
+    {-# INLINE writer #-}
+    tell = lift . tell
+    {-# INLINE tell #-}
+    listen = withFoldT $ \r yield x -> do
+        ((), w) <- listen $ return ()
+        yield r (x, w)
+    {-# INLINE listen #-}
+    pass = withFoldT $ \r yield (x, f) -> do
+        pass $ return ((), f)
+        yield r x
+    {-# INLINE pass #-}
+
+instance MonadError e m => MonadError e (FoldT r m) where
+    throwError = lift . throwError
+    {-# INLINE throwError #-}
+    catchError src f = folding $ \z yield ->
+        runFoldT src z yield `catchError` \e -> runFoldT (f e) z yield
+    {-# INLINE catchError #-}
+
+instance MonadThrow m => MonadThrow (FoldT r m) where
+    throwM e = lift $ throwM e
+    {-# INLINE throwM #-}
+
+instance MonadCatch m => MonadCatch (FoldT r m) where
+    catch src f = folding $ \z yield ->
+        runFoldT src z yield `Catch.catch` \e -> runFoldT (f e) z yield
+    {-# INLINE catch #-}
+
+instance MonadMask m => MonadMask (FoldT r m) where
+    mask a = folding $ \z yield -> Catch.mask $ \u ->
+        runFoldT (a $ \b -> folding $ \r yield' ->
+            u $ runFoldT b r yield') z yield
+    {-# INLINE mask #-}
+    uninterruptibleMask a =
+        folding $ \z yield -> Catch.uninterruptibleMask $ \u ->
+            runFoldT (a $ \b -> folding $ \r yield' ->
+                u $ runFoldT b r yield') z yield
+    {-# INLINE uninterruptibleMask #-}
+
+mapFoldT :: (m r -> m r) -> FoldT r m a -> FoldT r m a
+mapFoldT f (FoldT (Compose (CollectT gen))) =
+    FoldT $ Compose $ CollectT $ (f .) . gen
+
+withFoldT :: (r -> (r -> b -> m r) -> a -> m r) -> FoldT r m a
+               -> FoldT r m b
+withFoldT f (FoldT (Compose (CollectT gen))) =
+    FoldT $ Compose $ CollectT $ \z (CollectT yield) ->
+        gen z (CollectT $ flip f yield)
+
+genCallCC :: ((a -> FoldT r m b) -> FoldT r m a) -> FoldT r m a
+genCallCC f = FoldT $ Compose $ CollectT $ \z (CollectT c) ->
+    let FoldT (Compose (CollectT h)) =
+            f (\x -> FoldT $ Compose $ CollectT $ \r _ -> c r x)
+    in h z (CollectT c)
+
+-- | This fails to typecheck due to the existential in Source.
+-- sourceCallCC :: ((a -> Source m b) -> Source m a) -> Source m a
+-- sourceCallCC f = Source $ genCallCC $
+--     getOp $ contramap (fmap Source) $ Op $ fmap getSource f
+
+newtype CFoldT m a = CFoldT
+    { getCFoldT :: forall r. FoldT r (EitherT r m) a }
+    deriving Functor
+
+newtype Source m a = Source
+    { getSource :: forall r. Monoid r => ContT r (EitherT r m) a }
+    deriving Functor
 
 type Conduit a m b = Source m a -> Source m b
 type Sink a m r    = Source m a -> m r
 
 instance Monad m => Semigroup (Source m a) where
-    x <> y = source $ \r f -> lift $ sink r f x >>= \r' -> sink r' f y
+    Source x <> Source y = Source $ x <> y
     {-# INLINE (<>) #-}
 
 instance Monad m => Monoid (Source m a) where
@@ -291,9 +444,11 @@ instance Monad m => Alternative (Source m) where
     (<|>) = (<>)
     {-# INLINE (<|>) #-}
 
-instance Functor (Source m) where
-    fmap f (Source k) = Source (fmap f k)
-    {-# INLINE fmap #-}
+instance Monad m => MonadPlus (Source m) where
+    mzero = skip
+    {-# INLINE mzero #-}
+    mplus = (<|>)
+    {-# INLINE mplus #-}
 
 instance Applicative (Source m) where
     pure  = return
@@ -301,17 +456,10 @@ instance Applicative (Source m) where
     (<*>) = ap
     {-# INLINE (<*>) #-}
 
-instance Monad m => MonadPlus (Source m) where
-    mzero = abort
-    {-# INLINE mzero #-}
-    mplus = (<|>)
-    {-# INLINE mplus #-}
-
 instance Monad (Source m) where
-    return x = source $ \z yield -> yield z x
+    return x = Source $ return x
     {-# INLINE return #-}
-    src >>= f = source $ \z yield ->
-        runSource src z $ \r x -> runSource (f x) r yield
+    Source src >>= f = Source $ src >>= getSource . f
     {-# INLINE (>>=) #-}
 
 instance MFunctor Source where
@@ -323,12 +471,16 @@ instance MMonad Source where
     {-# INLINE embed #-}
 
 instance MonadIO m => MonadIO (Source m) where
-    liftIO m = source $ \z yield -> yield z =<< liftIO m
+    liftIO m = Source $ liftIO m
     {-# INLINE liftIO #-}
 
 instance MonadTrans Source where
     lift m = source $ \z yield -> yield z =<< lift m
     {-# INLINE lift #-}
+
+instance (Functor f, MonadFree f m) => MonadFree f (Source m) where
+    wrap t = source (\r h -> wrap (fmap (\p -> runSource p r h) t))
+    {-# INLINE wrap #-}
 
 instance MonadReader r m => MonadReader r (Source m) where
     ask     = lift ask
@@ -444,23 +596,21 @@ abort = source $ const . left
 {-# INLINE abort #-}
 
 skip :: Monad m => Source m a
-skip = source $ const . return
+skip = Source mzero
 {-# INLINE skip #-}
 
 source :: (forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r)
        -> Source m a
-source await = Source $ Compose $ CollectT $ \r (CollectT yield) ->
-    await r yield
+source await = Source $ folding await
 {-# INLINE source #-}
 
 runSource :: Source m a -> r -> (r -> a -> EitherT r m r) -> EitherT r m r
-runSource (Source (Compose (CollectT await))) z yield =
-    await z $ CollectT $ \r f -> yield r f
+runSource = runFoldT . getSource
 {-# INLINE runSource #-}
 
 conduit :: (forall r. r -> (r -> b -> EitherT r m r) -> a -> EitherT r m r)
         -> Conduit a m b
-conduit f src = source $ \z -> runSource src z . flip f
+conduit f (Source src) = Source $ withFoldT f src
 {-# INLINE conduit #-}
 
 -- | Most of the time conduits pass the fold variable through unmolested, but
@@ -491,8 +641,12 @@ yieldMany xs = source $ \z yield -> ofoldlM yield z xs
 {-# INLINE yieldMany #-}
 
 sourceList :: Monad m => [a] -> Source m a
-sourceList xs = source $ \z yield -> foldM yield z xs
+sourceList xs = Source $ sourceListGen xs
 {-# INLINE sourceList #-}
+
+sourceListGen :: Monad m => [a] -> FoldT r m a
+sourceListGen xs = folding $ \z yield -> foldM yield z xs
+{-# INLINE sourceListGen #-}
 
 unfoldC :: forall m a b. Monad m => (b -> Maybe (a, b)) -> b -> Source m a
 unfoldC = (sourceList .) . Data.List.unfoldr

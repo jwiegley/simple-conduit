@@ -20,7 +20,7 @@ module Conduit.Simple
     ( Source(..), Conduit, Sink
     , sequenceSources
     , ZipSink(..), sequenceSinks
-    , source, conduit, conduitWith, sink
+    , runSource, lowerSource, source, conduit, conduitWith, sink
     , ($=), (=$), ($$)
     , returnC, close, skip, awaitForever
     , yieldMany, sourceList
@@ -167,14 +167,13 @@ import           Control.Concurrent.Async.Lifted (Async, withAsync, waitBoth,
 import           Control.Concurrent.STM
 import           Control.Exception.Lifted (bracket)
 import           Control.Foldl (PrimMonad, Vector, FoldM(..))
-import           Control.Monad (liftM, MonadPlus(..), ap, (<=<), foldM)
 import           Control.Monad.Base (MonadBase(..))
 import           Control.Monad.Catch (MonadThrow(..), MonadMask, MonadCatch)
 import qualified Control.Monad.Catch as Catch
+import           Control.Monad.Cont
 import           Control.Monad.Error.Class (MonadError(..))
 import           Control.Monad.Free
-import           Control.Monad.IO.Class (MonadIO(..))
-import           Control.Monad.Morph (MonadTrans(..), MMonad(..), MFunctor(..))
+import           Control.Monad.Morph (MMonad(..), MFunctor(..))
 import           Control.Monad.Primitive (PrimMonad(PrimState))
 import           Control.Monad.Reader.Class (MonadReader(..))
 import           Control.Monad.State.Class (MonadState(..))
@@ -185,7 +184,7 @@ import           Data.Bifunctor (Bifunctor(bimap))
 import           Data.Builder (Builder(builderToLazy), ToBuilder(..))
 import           Data.ByteString (ByteString)
 import           Data.Foldable (Foldable(foldMap))
-import           Data.Functor.Identity (Identity(runIdentity))
+import           Data.Functor.Identity
 import           Data.IOData (IOData(hGetChunk, hPut))
 import           Data.List (unfoldr)
 import           Data.MonoTraversable (MonoTraversable, MonoFunctor, Element,
@@ -216,19 +215,14 @@ import           System.Random.MWC as MWC (Gen, Variate(uniform),
 (a -> r -> r) -> r -> r, which is the same as
 Cont (r -> r) a
 
-This is also isomorphic to the uncurried version:
-(((a, r) -> r), r) -> r, which is the same as
-Algebra (Algebra ((,) a)) r, a nested algebra over the tuple functor
+This is also isomorphic to an F-algebra of the function functor:
+Algebra ((->) a) (r -> r)
 
 m [] is isomorphic to
 (a -> r -> m r) -> r -> m r, which is the same as
-ContT r (ReaderT r m) a
+Cont (r -> m r) a, and
+Algebra ((->) a) (r -> m r)
 -}
-
--- | This is a simpler type of 'Cont'.  We cannot use the mtl version which
---   aliases to 'ContT' over 'Identity', because it places the 'r' underneath
---   Identity.
-type Cont r a = (a -> r) -> r
 
 -- | A Source is a short-circuiting monadic fold.
 --
@@ -337,6 +331,11 @@ instance MonadTrans Source where
 instance (Functor f, MonadFree f m) => MonadFree f (Source m) where
     wrap t = source $ \r h -> wrap $ fmap (\p -> runSource p r h) t
     {-# INLINE wrap #-}
+
+-- jww (2014-06-15): If it weren't for the universally quantified r...
+-- instance MonadCont (Source m) where
+--     callCC f = source $ \z c -> runSource (f (\x -> source $ \r _ -> c r x)) z c
+--     {-# INLINE callCC #-}
 
 instance MonadReader r m => MonadReader r (Source m) where
     ask = lift ask
@@ -455,14 +454,19 @@ skip :: Monad m => Source m a
 skip = source $ const . return
 {-# INLINE skip #-}
 
-source :: (forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r)
-       -> Source m a
-source await = Source $ \yield z -> await z (flip yield)
-{-# INLINE source #-}
-
 runSource :: Source m a -> r -> (r -> a -> EitherT r m r) -> EitherT r m r
-runSource (Source src) z yield = src (flip yield) z
+runSource (Source (ContT src)) z yield =
+    runIdentity (src (\x -> Identity $ \r -> yield r x)) z
 {-# INLINE runSource #-}
+
+lowerSource :: (Monad m, Monoid a) => Source m a -> m a
+lowerSource src = unwrap id $ runSource src mempty ((return .) . mappend)
+{-# INLINE lowerSource #-}
+
+source :: (forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r) -> Source m a
+source await = Source $ ContT $ \yield -> Identity $ \z ->
+    await z (\r x -> runIdentity (yield x) r)
+{-# INLINE source #-}
 
 conduit :: (forall r. r -> (r -> b -> EitherT r m r) -> a -> EitherT r m r)
         -> Conduit a m b
@@ -483,6 +487,10 @@ conduitWith s f src = source $ \z yield ->
     rewrap fst $ runSource src (z, s) $ \(r, t) ->
         f (r, t) (\r' -> rewrap (, t) . yield r')
 {-# INLINE conduitWith #-}
+
+unwrap :: Monad m => (a -> b) -> EitherT a m a -> m b
+unwrap f k = either f f `liftM` runEitherT k
+{-# INLINE unwrap #-}
 
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
 rewrap f k = EitherT $ bimap f f `liftM` runEitherT k
@@ -1318,12 +1326,10 @@ untilMC m f = source go
     go z yield = loop z
       where
         loop r = do
-            x <- lift m
+            x  <- lift m
             r' <- yield r x
-            cont <- lift f
-            if cont
-                then loop r'
-                else return r'
+            c  <- lift f
+            if c then loop r' else return r'
 
 whileMC :: forall m a. Monad m => m Bool -> m a -> Source m a
 whileMC f m = source go
@@ -1332,7 +1338,7 @@ whileMC f m = source go
     go z yield = loop z
       where
         loop r = do
-            cont <- lift f
-            if cont
+            c <- lift f
+            if c
                 then lift m >>= yield r >>= loop
                 else return r

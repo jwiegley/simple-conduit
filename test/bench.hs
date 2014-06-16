@@ -4,6 +4,7 @@ module Main where
 
 import qualified Conduit as C
 import           Conduit.Simple
+import           Conduit.Simple.Compat
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Criterion.Main (defaultMain, bench, nf)

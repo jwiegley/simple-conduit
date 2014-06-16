@@ -3,20 +3,20 @@
 , either, bifunctors, chunkedData, monoTraversable, text, foldl
 
 , primitive, streamingCommons, vector, filepath, mwcRandom
-, liftedAsync, stm, semigroups, contravariant
+, liftedAsync, stm, semigroups, contravariant, free
 
 , conduit, conduitExtra, conduitCombinators
 }:
 
 cabal.mkDerivation (self: {
   pname = "simple-conduit";
-  version = "0.4.0";
+  version = "0.5.0";
   src = ./.;
   buildDepends = [
     exceptions liftedBase mmorph monadControl mtl transformers
     transformersBase void either bifunctors chunkedData monoTraversable
     primitive streamingCommons vector filepath mwcRandom liftedAsync
-    foldl stm contravariant
+    foldl stm contravariant free
   ];
   testDepends = [
     hspec mtl QuickCheck transformers void text criterion

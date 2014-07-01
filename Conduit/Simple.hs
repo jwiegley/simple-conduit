@@ -921,7 +921,7 @@ asyncC f = awaitForever $ lift . async . f
 --
 -- >>> fromFoldM (FoldM ((return .) . (+)) (return 0) return) $ yieldMany [1..10]
 -- 55
-fromFoldM :: Monad m => FoldM m a b -> Source m a -> m b
+fromFoldM :: Monad m => FoldM m a b -> Sink a m b
 fromFoldM (FoldM step initial final) src =
     initial >>= (\r -> sink r ((lift .) . step) src) >>= final
 {-# INLINE fromFoldM #-}
@@ -931,9 +931,11 @@ fromFoldM (FoldM step initial final) src =
 --
 -- >>> toFoldM sumC (\f -> Control.Foldl.foldM f [1..10])
 -- 55
-toFoldM :: Monad m
-        => Sink a m r -> (forall s. FoldM (EitherT s m) a s -> EitherT s m s) -> m r
-toFoldM s f = s $ source $ \k yield -> f $ FoldM yield (return k) return
+toFoldM :: Monad m => Sink a m b -> (forall r. FoldM m a r -> m r) -> m b
+toFoldM s f = s $ source $ \k yield ->
+    EitherT $ liftM Right $ f $
+        FoldM (\r x -> either id id `liftM` runEitherT (yield r x))
+            (return k) return
 {-# INLINE toFoldM #-}
 
 sourceSTM :: forall container a. (container a -> STM a)

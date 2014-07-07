@@ -113,7 +113,7 @@ instance Applicative (Source m) where
 instance Monad (Source m) where
     return x = Source $ return x
     {-# INLINE return #-}
-    Source m >>= f = Source $ m >>= getSource . f
+    Source m >>= f = Source $ join (liftM (getSource . f) m)
     {-# INLINE (>>=) #-}
 
 instance MFunctor Source where
@@ -211,6 +211,10 @@ instance Foldable (Source Identity) where
 returnC :: Monad m => m a -> Source m a
 returnC = lift
 {-# INLINE returnC #-}
+
+prod :: Source m (Cont (r -> EitherT r m r) (Source m a))
+     -> Cont (r -> EitherT r m r) (Source m a)
+prod (Source (ContT src)) = ContT $ \yield -> src $ \(ContT x) -> x yield
 
 close :: Monad m => Source m a
 close = source $ const . left

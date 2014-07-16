@@ -1,3 +1,4 @@
+{-# LANGUAGE Arrows #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Main where
@@ -5,6 +6,7 @@ module Main where
 import qualified Conduit as C
 import           Conduit.Simple
 import           Conduit.Simple.Compat
+import           Control.Arrow
 import           Control.Monad
 import           Control.Monad.IO.Class
 import           Criterion.Main (defaultMain, bench, nf)
@@ -33,10 +35,11 @@ main = do
     print (T.unpack (decodeUtf8 (Prelude.head us)))
 
     vs <- sinkList
-        $ mapC (<> "Hello")
-        $ takeC 1
-        $ sourceFile "simple-conduit.cabal" <> sourceFile "README.md"
-    print (T.unpack (decodeUtf8 (Prelude.head vs)))
+        $ (proc x -> do y <- mapC (+1) -< x
+                        g <- takeC 1 -< y
+                        returnA -< g)
+        $ yieldMany ([1..10] :: [Int])
+    print (vs :: [Int])
 
     x <- sinkList $ returnC $ sumC $ mapC (+1) $ yieldMany ([1..10] :: [Int])
     print x

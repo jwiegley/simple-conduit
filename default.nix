@@ -1,6 +1,7 @@
 { cabal, exceptions, hspec, liftedBase, mmorph, monadControl, mtl
 , QuickCheck, transformers, transformersBase, void, criterion
 , either, bifunctors, chunkedData, monoTraversable, text, foldl
+, CCdelcont, machines
 
 , primitive, streamingCommons, vector, filepath, mwcRandom
 , liftedAsync, stm, semigroups, contravariant, free
@@ -11,7 +12,7 @@
 cabal.mkDerivation (self: {
   pname = "simple-conduit";
   version = "0.5.0";
-  src = ./.;
+  src = builtins.filterSource (path: type: type != "unknown") ./.;
   buildDepends = [
     exceptions liftedBase mmorph monadControl mtl transformers
     transformersBase void either bifunctors chunkedData monoTraversable
@@ -21,7 +22,7 @@ cabal.mkDerivation (self: {
   testDepends = [
     hspec mtl QuickCheck transformers void text criterion
     # jww (2014-06-06): Remove these once things get stable
-    conduit conduitExtra conduitCombinators
+    conduit conduitExtra conduitCombinators CCdelcont
   ];
   doCheck = true;
   configureFlags = "--enable-benchmarks";

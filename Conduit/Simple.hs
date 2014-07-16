@@ -145,22 +145,24 @@ module Conduit.Simple
     , sourceMaybeMVar
     , sourceMaybeTMVar
     , asyncC
-    , fromFoldM
-    , toFoldM
     , sourceTChan
     , sourceTQueue
     , sourceTBQueue
     , untilMC
     , whileMC
+    , zipSinks
+
+    , ($=), (=$), ($$)
+    , sequenceSources
     ) where
 
+import           Conduit.Simple.Compat
 import           Conduit.Simple.Core
 import           Control.Applicative ((<$>))
-import           Control.Concurrent (MVar, takeMVar)
-import           Control.Concurrent.Async.Lifted (Async, async)
+import           Control.Concurrent.Async.Lifted
+import           Control.Concurrent.Lifted hiding (yield)
 import           Control.Concurrent.STM
 import           Control.Exception.Lifted (bracket)
-import           Control.Foldl (PrimMonad, Vector, FoldM(..))
 import           Control.Monad.Base (MonadBase(..))
 import           Control.Monad.Catch (MonadThrow)
 import           Control.Monad.Cont
@@ -186,6 +188,7 @@ import qualified Data.Streaming.Filesystem as F
 import           Data.Text (Text)
 import           Data.Textual.Encoding (Utf8(encodeUtf8))
 import           Data.Traversable (Traversable)
+import qualified Data.Vector.Generic as V
 import           Data.Word (Word8)
 import           System.FilePath ((</>))
 import           System.IO (stdout, stdin, stderr, openFile, hClose,
@@ -486,11 +489,11 @@ sinkList :: Monad m => Sink a m [a]
 sinkList = produceList id
 {-# INLINE sinkList #-}
 
-sinkVector :: (MonadBase base m, Vector v a, PrimMonad base)
+sinkVector :: (MonadBase base m, V.Vector v a, PrimMonad base)
            => Sink a m (v a)
 sinkVector = undefined
 
-sinkVectorN :: (MonadBase base m, Vector v a, PrimMonad base)
+sinkVectorN :: (MonadBase base m, V.Vector v a, PrimMonad base)
             => Int -> Sink a m (v a)
 sinkVectorN = undefined
 
@@ -736,7 +739,7 @@ mapWhileC :: Monad m => (a -> Maybe b) -> Conduit a m b
 mapWhileC f = awaitForever $ \x -> case f x of Just y -> return y; _ -> close
 {-# INLINE mapWhileC #-}
 
-conduitVector :: (MonadBase base m, Vector v a, PrimMonad base)
+conduitVector :: (MonadBase base m, V.Vector v a, PrimMonad base)
               => Int -> Conduit a m (v a)
 conduitVector = undefined
 
@@ -915,29 +918,6 @@ asyncC :: (MonadBaseControl IO m, Monad m)
 asyncC f = awaitForever $ lift . async . f
 {-# INLINE asyncC #-}
 
--- | Convert a 'Control.Foldl.FoldM' fold abstraction into a Sink.
---
---   NOTE: This requires ImpredicativeTypes in the code that uses it.
---
--- >>> fromFoldM (FoldM ((return .) . (+)) (return 0) return) $ yieldMany [1..10]
--- 55
-fromFoldM :: Monad m => FoldM m a b -> Sink a m b
-fromFoldM (FoldM step initial final) src =
-    initial >>= (\r -> sink r ((lift .) . step) src) >>= final
-{-# INLINE fromFoldM #-}
-
--- | Convert a Sink into a 'Control.Foldl.FoldM', passing it as a continuation
---   over the elements.
---
--- >>> toFoldM sumC (\f -> Control.Foldl.foldM f [1..10])
--- 55
-toFoldM :: Monad m => Sink a m b -> (forall r. FoldM m a r -> m r) -> m b
-toFoldM s f = s $ source $ \k yield ->
-    EitherT $ liftM Right $ f $
-        FoldM (\r x -> either id id `liftM` runEitherT (yield r x))
-            (return k) return
-{-# INLINE toFoldM #-}
-
 sourceSTM :: forall container a. (container a -> STM a)
           -> (container a -> STM Bool)
           -> container a
@@ -991,3 +971,17 @@ whileMC f m = source go
             if c
                 then lift m >>= yield r >>= loop
                 else return r
+
+zipSinks :: forall a m r r'. (MonadBaseControl IO m, MonadIO m)
+         => Sink a m r -> Sink a m r' -> Sink a m (r, r')
+zipSinks sink1 sink2 src = do
+    x <- liftIO newEmptyMVar
+    y <- liftIO newEmptyMVar
+    withAsync (sink1 $ sourceMaybeMVar x) $ \a ->
+        withAsync (sink2 $ sourceMaybeMVar y) $ \b -> do
+            _ <- runEitherT $ runSource src () $ \() val -> do
+                liftIO $ putMVar x (Just val)
+                liftIO $ putMVar y (Just val)
+            liftIO $ putMVar x Nothing
+            liftIO $ putMVar y Nothing
+            waitBoth a b

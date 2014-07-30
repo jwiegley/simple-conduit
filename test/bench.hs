@@ -12,8 +12,10 @@ import           Control.Monad.IO.Class
 import           Criterion.Main (defaultMain, bench, nf)
 import           Data.Functor.Identity
 import           Data.Monoid
-import           Data.Text as T
+import qualified Data.Vector as V
+import qualified Data.Text as T
 import           Data.Text.Encoding
+import System.IO.Unsafe (unsafePerformIO)
 
 main :: IO ()
 main = do
@@ -46,17 +48,69 @@ main = do
 
     yieldMany ([1..10] :: [Int]) $$ mapM_C (liftIO . print)
 
-    defaultMain [
-        bench "centipede1" $ nf (runIdentity . useThis) ([1..1000000] :: [Int])
-      , bench "conduit1"   $ nf (runIdentity . useThat) ([1..1000000] :: [Int])
-      , bench "centipede2" $ nf (runIdentity . useThis) ([1..1000000] :: [Int])
-      , bench "centipede3" $ nf (runIdentity . useThis2) ([1..1000000] :: [Int])
-      , bench "conduit2"   $ nf (runIdentity . useThat) ([1..1000000] :: [Int])
-      ]
+    defaultMain
+        [ -- bench "centipede1" $ nf (runIdentity . useThis) ([1..1000000] :: [Int])
+        -- , bench "conduit1"   $ nf (runIdentity . useThat) ([1..1000000] :: [Int])
+        -- , bench "centipede2" $ nf (runIdentity . useThis) ([1..1000000] :: [Int])
+        -- , bench "centipede3" $ nf (runIdentity . useThis2) ([1..1000000] :: [Int])
+        -- , bench "conduit2"   $ nf (runIdentity . useThat) ([1..1000000] :: [Int])
+        -- ,
+          bench "rechunk1"   $ nf (unsafePerformIO . rechunk1)
+                                  (replicate 10 [1..10000])
+        , bench "rechunk1IO" $ nf (unsafePerformIO . rechunk1IO)
+                                  (replicate 10 [1..10000])
+        , bench "C.rechunk1" $ nf (unsafePerformIO . conduitRechunk1)
+                                  (replicate 10 [1..10000])
+        , bench "C.rechunk3" $ nf (unsafePerformIO . conduitRechunk3)
+                                  (replicate 10 [1..10000])
+        ]
   where
     useThis xs = yieldMany xs $= mapC (+2) $$ sinkList
     useThis2 xs = yieldMany2 xs $= mapC (+2) $$ sinkList2
     useThat xs = C.yieldMany xs C.$= C.mapC (+2) C.$$ C.sinkList
+
+rechunk1 :: [[Int]] -> IO [V.Vector Int]
+rechunk1 xs = sourceList xs
+         $= concatC
+        =$= concatMapC (\x -> [x, x])
+        =$= conduitVector 512
+         $$ sinkList
+
+rechunk1IO :: [[Int]] -> IO [V.Vector Int]
+rechunk1IO xs = sourceList xs
+         $= concatC
+        =$= concatMapC (\x -> [x, x])
+        =$= conduitVectorIO 512
+         $$ sinkList
+
+-- rechunk2 =
+--     mapC (concatMap $ replicate 2) =$= loop
+--   where
+--     loop = do
+--         x <- takeCE 512 $= foldC
+--         unless (null x) $ yield x >> loop
+
+conduitRechunk1 :: [[Int]] -> IO [V.Vector Int]
+conduitRechunk1 xs = C.yieldMany xs
+        C.$= C.concatC
+       C.=$= C.concatMapC (\x -> [x, x])
+       C.=$= C.conduitVector 512
+        C.$$ C.sinkList
+
+-- conduitRechunk2 :: [[Int]] -> IO [V.Vector Int]
+-- conduitRechunk2 xs = C.yieldMany xs
+--      C.$= C.mapC (concatMap $ replicate 2)
+--     C.=$= loop
+--      C.$$ C.sinkList
+--   where
+--     loop = do
+--         x <- C.takeCE 512 C.=$= C.foldC
+--         unless (null x) $ C.yield x >> loop
+
+conduitRechunk3 :: [[Int]] -> IO [V.Vector Int]
+conduitRechunk3 xs = C.yieldMany xs
+    C.$= C.vectorBuilderC 512 (\yield' -> C.mapM_CE (\x -> yield' x >> yield' x))
+    C.$$ C.sinkList
 
 yieldMany2 :: Monad m => [a] -> Source m a
 yieldMany2 xs = source $ \z yield -> foldM yield z xs

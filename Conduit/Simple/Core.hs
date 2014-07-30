@@ -84,122 +84,91 @@ type Sink a m r = Source m a -> m r
 
 instance Monad m => Semigroup (Source m a) where
     x <> y = source $ \r c -> runSource x r c >>= \r' -> runSource y r' c
-    {-# INLINE (<>) #-}
 
 instance Monad m => Monoid (Source m a) where
     mempty  = skip
-    {-# INLINE mempty #-}
     mappend = (<>)
-    {-# INLINE mappend #-}
 
 instance Monad m => Alternative (Source m) where
     empty = skip
-    {-# INLINE empty #-}
     (<|>) = (<>)
-    {-# INLINE (<|>) #-}
 
 instance Monad m => MonadPlus (Source m) where
     mzero = skip
-    {-# INLINE mzero #-}
     mplus = (<|>)
-    {-# INLINE mplus #-}
 
 instance Applicative (Source m) where
     pure  = return
-    {-# INLINE pure #-}
-    (<*>) = ap
-    {-# INLINE (<*>) #-}
+    f <*> x = source $ \z yield ->
+        runSource f z (\r f' ->
+                        runSource x r (\s x' ->
+                                        yield s (f' x')))
 
 instance Monad (Source m) where
     return x = Source $ return x
-    {-# INLINE return #-}
     Source m >>= f = Source $ join (liftM (getSource . f) m)
-    {-# INLINE (>>=) #-}
 
 instance MFunctor Source where
     hoist nat m = source $ runSource (hoist nat m)
-    {-# INLINE hoist #-}
 
 instance MMonad Source where
     embed f m = source $ runSource (embed f m)
-    {-# INLINE embed #-}
 
 instance MonadIO m => MonadIO (Source m) where
     liftIO m = source $ \r yield -> liftIO m >>= yield r
-    {-# INLINE liftIO #-}
 
 instance MonadTrans Source where
     lift m = source $ \r yield -> lift m >>= yield r
-    {-# INLINE lift #-}
 
 instance (Functor f, MonadFree f m) => MonadFree f (Source m) where
     wrap t = source $ \r h -> wrap $ fmap (\p -> runSource p r h) t
-    {-# INLINE wrap #-}
 
 -- jww (2014-06-15): If it weren't for the universally quantified r...
 -- instance MonadCont (Source m) where
 --     callCC f = source $ \z c -> runSource (f (\x -> source $ \r _ -> c r x)) z c
---     {-# INLINE callCC #-}
 
 instance MonadReader r m => MonadReader r (Source m) where
     ask = lift ask
-    {-# INLINE ask #-}
     local f = conduit $ \r yield -> local f . yield r
-    {-# INLINE local #-}
     reader = lift . reader
-    {-# INLINE reader #-}
 
 instance MonadState s m => MonadState s (Source m) where
     get = lift get
-    {-# INLINE get #-}
     put = lift . put
-    {-# INLINE put #-}
     state = lift . state
-    {-# INLINE state #-}
 
 instance MonadWriter w m => MonadWriter w (Source m) where
     writer = lift . writer
-    {-# INLINE writer #-}
     tell = lift . tell
-    {-# INLINE tell #-}
     listen = conduit $ \r yield x ->
         listen (return ()) >>= yield r . first (const x)
-    {-# INLINE listen #-}
     pass = conduit $ \r yield (x, f) -> pass (return ((), f)) >> yield r x
-    {-# INLINE pass #-}
 
 instance MonadError e m => MonadError e (Source m) where
     throwError = lift . throwError
-    {-# INLINE throwError #-}
     catchError src f = source $ \z yield -> EitherT $
         runEitherT (runSource src z yield)
             `catchError` \e -> runEitherT (runSource (f e) z yield)
-    {-# INLINE catchError #-}
 
 instance MonadThrow m => MonadThrow (Source m) where
     throwM = lift . throwM
-    {-# INLINE throwM #-}
 
 instance MonadCatch m => MonadCatch (Source m) where
     catch src f = source $ \z yield -> EitherT $
         runEitherT (runSource src z yield)
             `Catch.catch` \e -> runEitherT (runSource (f e) z yield)
-    {-# INLINE catch #-}
 
 instance MonadMask m => MonadMask (Source m) where
     mask a = source $ \z yield -> EitherT $ Catch.mask $ \u ->
         runEitherT $ runSource (a $ \b -> source $ \r yield' ->
             EitherT $ liftM Right $ u $ sink r yield' b) z yield
-    {-# INLINE mask #-}
     uninterruptibleMask a =
         source $ \z yield -> EitherT $ Catch.uninterruptibleMask $ \u ->
             runEitherT $ runSource (a $ \b -> source $ \r yield' ->
                 EitherT $ liftM Right $ u $ sink r yield' b) z yield
-    {-# INLINE uninterruptibleMask #-}
 
 instance Foldable (Source Identity) where
     foldMap f = runIdentity . sink mempty (\r x -> return $ r `mappend` f x)
-    {-# INLINE foldMap #-}
 
 -- | Promote any sink to a source.  This can be used as if it were a source
 --   transformer (aka, a conduit):
@@ -210,7 +179,6 @@ instance Foldable (Source Identity) where
 -- Note that 'returnC' is a synonym for 'Control.Monad.Trans.Class.lift'.
 returnC :: Monad m => m a -> Source m a
 returnC = lift
-{-# INLINE returnC #-}
 
 prod :: Source m (Cont (r -> EitherT r m r) (Source m a))
      -> Cont (r -> EitherT r m r) (Source m a)
@@ -218,30 +186,24 @@ prod (Source (ContT src)) = ContT $ \yield -> src $ \(ContT x) -> x yield
 
 close :: Monad m => Source m a
 close = source $ const . left
-{-# INLINE close #-}
 
 skip :: Monad m => Source m a
 skip = source $ const . return
-{-# INLINE skip #-}
 
 runSource :: Source m a -> r -> (r -> a -> EitherT r m r) -> EitherT r m r
 runSource (Source (ContT src)) z yield =
     runIdentity (src (\x -> Identity $ \r -> yield r x)) z
-{-# INLINE runSource #-}
 
 lowerSource :: (Monad m, Monoid a) => Source m a -> m a
 lowerSource src = unwrap $ runSource src mempty ((return .) . mappend)
-{-# INLINE lowerSource #-}
 
 source :: (forall r. r -> (r -> a -> EitherT r m r) -> EitherT r m r) -> Source m a
 source await = Source $ ContT $ \yield -> Identity $ \z ->
     await z (\r x -> runIdentity (yield x) r)
-{-# INLINE source #-}
 
 conduit :: (forall r. r -> (r -> b -> EitherT r m r) -> a -> EitherT r m r)
         -> Conduit a m b
 conduit f src = source $ \z c -> runSource src z (`f` c)
-{-# INLINE conduit #-}
 
 -- | Most of the time conduits pass the fold variable through unmolested, but
 --   sometimes you need to ignore that variable and use your own within a
@@ -256,20 +218,15 @@ conduitWith :: Monad m
 conduitWith s f src = source $ \z yield ->
     rewrap fst $ runSource src (z, s) $ \(r, t) ->
         f (r, t) (\r' -> rewrap (, t) . yield r')
-{-# INLINE conduitWith #-}
 
 unwrap :: Monad m => EitherT a m a -> m a
 unwrap k = either id id `liftM` runEitherT k
-{-# INLINE unwrap #-}
 
 rewrap :: Monad m => (a -> b) -> EitherT a m a -> EitherT b m b
 rewrap f k = EitherT $ bimap f f `liftM` runEitherT k
-{-# INLINE rewrap #-}
 
 sink :: forall m a r. Monad m => r -> (r -> a -> EitherT r m r) -> Sink a m r
 sink z f src = either id id `liftM` runEitherT (runSource src z f)
-{-# INLINE sink #-}
 
 awaitForever :: (a -> Source m b) -> Conduit a m b
-awaitForever = flip (>>=)
-{-# INLINE awaitForever #-}
+awaitForever = (=<<)

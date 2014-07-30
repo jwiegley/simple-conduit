@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Conduit.Simple.Compat
-    ( ($=), (=$), ($$)
+    ( ($=), (=$), (=$=), ($$)
     , sequenceSources
     -- , adaptFrom, adaptTo
     ) where
@@ -36,14 +36,17 @@ import           Data.Traversable
 infixl 1 $=
 ($=) :: a -> (a -> b) -> b
 ($=) = flip ($)
-{-# INLINE ($=) #-}
 
 -- | Compose a 'Conduit' and a 'Sink' into a new 'Sink'.  Note that this is
 --   just function composition, so (.) can be used to achieve the same thing.
 infixr 2 =$
 (=$) :: (a -> b) -> (b -> c) -> a -> c
 (=$) = flip (.)
-{-# INLINE (=$) #-}
+
+-- | Compose two 'Conduit'.  This is also just function composition.
+infixr 2 =$=
+(=$=) :: (a -> b) -> (b -> c) -> a -> c
+(=$=) = flip (.)
 
 -- | Compose a 'Source' and a 'Sink' and compute the result.  Note that this
 --   is just flipped function application, so ($) can be used to achieve the
@@ -51,7 +54,6 @@ infixr 2 =$
 infixr 0 $$
 ($$) :: a -> (a -> b) -> b
 ($$) = flip ($)
-{-# INLINE ($$) #-}
 
 -- | Sequence a collection of sources.
 --
@@ -59,7 +61,6 @@ infixr 0 $$
 -- [[1,2,3]]
 sequenceSources :: (Traversable f, Monad m) => f (Source m a) -> Source m (f a)
 sequenceSources = sequenceA
-{-# INLINE sequenceSources #-}
 
 {-
 -- | Convert a 'Control.Foldl.FoldM' fold abstraction into a Sink.
@@ -71,7 +72,6 @@ sequenceSources = sequenceA
 fromFoldM :: Monad m => FoldM m a b -> Sink a m b
 fromFoldM (FoldM step initial final) src =
     initial >>= (\r -> sink r ((lift .) . step) src) >>= final
-{-# INLINE fromFoldM #-}
 
 -- | Convert a Sink into a 'Control.Foldl.FoldM', passing it as a continuation
 --   over the elements.
@@ -83,7 +83,6 @@ toFoldM s f = s $ source $ \k yield ->
     EitherT $ liftM Right $ f $
         FoldM (\r x -> either id id `liftM` runEitherT (yield r x))
             (return k) return
-{-# INLINE toFoldM #-}
 
 -- | Turns any conduit 'Producer' into a simple-conduit 'Source'.
 --   Finalization is taken care of, as is processing of leftovers, provided

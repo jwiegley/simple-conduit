@@ -2,3 +2,5 @@
 /Setup
 *.glob
 *.vo
+/Conduit/Simple.ibc
+/Conduit/test

@@ -5,13 +5,14 @@
 module Conduit.Simple.Compat
     ( ($=), (=$), (=$=), ($$)
     , sequenceSources
+    -- , toFoldM, fromFoldM
     -- , adaptFrom, adaptTo
     ) where
 
 import           Conduit.Simple.Core
 -- import           Control.Category (Category)
 -- import           Control.Exception.Lifted (finally)
--- import           Control.Foldl (PrimMonad, Vector, FoldM(..))
+-- import           Control.Foldl (FoldM(..))
 -- import           Control.Monad (liftM)
 -- import           Control.Monad.CC hiding (control)
 -- import           Control.Monad.Cont
@@ -70,8 +71,8 @@ sequenceSources = sequenceA
 -- >>> fromFoldM (FoldM ((return .) . (+)) (return 0) return) $ yieldMany [1..10]
 -- 55
 fromFoldM :: Monad m => FoldM m a b -> Sink a m b
-fromFoldM (FoldM step initial final) src =
-    initial >>= (\r -> sink r ((lift .) . step) src) >>= final
+fromFoldM (FoldM step start done) src =
+    start >>= (\r -> sink r ((lift .) . step) src) >>= done
 
 -- | Convert a Sink into a 'Control.Foldl.FoldM', passing it as a continuation
 --   over the elements.
@@ -79,10 +80,8 @@ fromFoldM (FoldM step initial final) src =
 -- >>> toFoldM sumC (\f -> Control.Foldl.foldM f [1..10])
 -- 55
 toFoldM :: Monad m => Sink a m b -> (forall r. FoldM m a r -> m r) -> m b
-toFoldM s f = s $ source $ \k yield ->
-    EitherT $ liftM Right $ f $
-        FoldM (\r x -> either id id `liftM` runEitherT (yield r x))
-            (return k) return
+toFoldM s f = s $ source $ \z yield ->
+    lift $ f $ FoldM ((unwrap .) . yield) (return z) return
 
 -- | Turns any conduit 'Producer' into a simple-conduit 'Source'.
 --   Finalization is taken care of, as is processing of leftovers, provided

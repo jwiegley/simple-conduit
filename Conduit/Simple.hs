@@ -151,7 +151,7 @@ module Conduit.Simple
     , whileMC
     , zipSinks
 
-    , ($=), (=$), ($$)
+    , ($=), (=$), (=$=), ($$)
     , sequenceSources
     ) where
 

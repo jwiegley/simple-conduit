@@ -262,21 +262,25 @@ sourceHandle h = source go
             if onull x
                 then return y
                 else loop =<< yield y x
+{-# SPECIALIZE sourceHandle :: IOData a => Handle -> Source IO a #-}
 
 sourceFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
            => FilePath -> Source m a
 sourceFile path = source $ \z yield ->
     liftBaseOp (bracket (openFile path ReadMode) hClose)
         (\h -> runSource (sourceHandle h) z yield)
+{-# SPECIALIZE sourceFile :: IOData a => FilePath -> Source IO a #-}
 
 sourceIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
                => IO Handle -> Source m a
 sourceIOHandle f = source $ \z yield ->
     liftBaseOp (bracket f hClose) $ \h ->
         runSource (sourceHandle h) z yield
+{-# SPECIALIZE sourceIOHandle :: IOData a => IO Handle -> Source IO a #-}
 
 stdinC :: (MonadBaseControl IO m, MonadIO m, IOData a) => Source m a
 stdinC = sourceHandle stdin
+{-# SPECIALIZE stdinC :: IOData a => Source IO a #-}
 
 initRepeat :: Monad m => m seed -> (seed -> m a) -> Source m a
 initRepeat mseed f = source $ \z yield ->
@@ -316,6 +320,7 @@ sourceDirectory dir = source $ \z yield ->
             case mfp of
                 Nothing -> return r
                 Just fp -> loop =<< yield r (dir </> fp)
+{-# SPECIALIZE sourceDirectory :: FilePath -> Source IO FilePath #-}
 
 sourceDirectoryDeep :: forall m. MonadBaseControl IO m
                     => Bool -> FilePath -> Source m FilePath
@@ -335,20 +340,13 @@ sourceDirectoryDeep followSymlinks startDir = source go
                     | followSymlinks -> start fp r
                     | otherwise -> return r
                 F.FTOther -> return r
+{-# SPECIALIZE sourceDirectoryDeep :: Bool -> FilePath -> Source IO FilePath #-}
 
 dropC :: Monad m => Int -> Conduit a m a
 dropC n = conduitWith n go
   where
     go (r, n') _ _ | n' > 0 = return (r, n' - 1)
     go (r, _) yield x       = yield r x
-
-{-
-dropCGen :: Monad m => Int -> FoldT (r, Int) m a -> FoldT r m a
-dropCGen n = foldWith n go
-  where
-    go (r, n') _ _ | n' > 0 = return (r, n' - 1)
-    go (r, _) yield x       = yield r x
--}
 
 dropCE :: (Monad m, IsSequence seq) => Index seq -> Conduit seq m seq
 dropCE n = conduitWith n go
@@ -602,20 +600,6 @@ takeC n = conduitWith n go
         | otherwise = left (z', 0)
       where
         next = fmap pred <$> yield z' x
-
-{-
-takeCGen :: Monad m
-         => Int -> FoldT (r, Int) (EitherT (r, Int) m) a
-         -> FoldT r (EitherT r m) a
-takeCGen n = foldWith' n go
-  where
-    go (z', n') yield x
-        | n' > 1    = next
-        | n' > 0    = left =<< next
-        | otherwise = left (z', 0)
-      where
-        next = fmap pred <$> yield z' x
--}
 
 takeCE :: (Monad m, IsSequence seq) => Index seq -> Conduit seq m seq
 takeCE = undefined
@@ -906,3 +890,4 @@ zipSinks sink1 sink2 src = do
             liftIO $ putMVar x Nothing
             liftIO $ putMVar y Nothing
             waitBoth a b
+{-# SPECIALIZE zipSinks :: Sink a IO r -> Sink a IO r' -> Sink a IO (r, r') #-}

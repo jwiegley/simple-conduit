@@ -18,6 +18,7 @@ Cabal-version:       >=1.8
 Homepage:            http://github.com/jwiegley/simple-conduit
 
 Library
+  ghc-options:     -Wall -O2 -funbox-strict-fields
   Exposed-modules:
     Conduit.Simple
     Conduit.Simple.Compat
@@ -52,14 +53,13 @@ Library
     , transformers-base        >= 0.4.1        && < 0.5
     , vector
     -- , void                     >= 0.5.5
-  ghc-options:     -Wall -O2 -funbox-strict-fields
 
 benchmark bench
   hs-source-dirs: .
+  ghc-options: -O2 -funbox-strict-fields
   other-modules: Conduit.Simple.Compat
   main-is: test/bench.hs
   type: exitcode-stdio-1.0
-  ghc-options: -O2
   cpp-options: -DTEST
   build-depends:
       simple-conduit
@@ -96,7 +96,6 @@ benchmark bench
     , conduit
     , conduit-extra
     , conduit-combinators
-  ghc-options:     -Wall
 
 source-repository head
   type:     git

@@ -80,7 +80,7 @@ rechunk1IO :: [[Int]] -> IO [V.Vector Int]
 rechunk1IO xs = sourceList xs
          $= concatC
         =$= concatMapC (\x -> [x, x])
-        =$= conduitVectorIO 512
+        =$= conduitVector 512
          $$ sinkList
 
 -- rechunk2 =

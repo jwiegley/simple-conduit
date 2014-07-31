@@ -195,8 +195,6 @@ import           System.IO (stdout, stdin, stderr, openFile, hClose,
                             Handle, IOMode(ReadMode, WriteMode))
 import           System.Random.MWC as MWC (Gen, Variate(uniform),
                                            createSystemRandom)
--- import           Data.Primitive.MutVar       (MutVar, newMutVar, readMutVar,
---                                               writeMutVar)
 
 yieldMany :: (Monad m, MonoFoldable mono) => mono -> Source m (Element mono)
 yieldMany xs = source $ \z yield -> ofoldlM yield z xs

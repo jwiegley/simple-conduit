@@ -27,18 +27,14 @@ Library
       base                     >= 4.3          && < 5
     , bifunctors
     , bytestring
-    -- , CC-delcont
     , chunked-data
     , containers
-    -- , contravariant
     , either
     , exceptions
     , filepath
-    -- , foldl
     , free
     , lifted-async
     , lifted-base              >= 0.1
-    -- , machines
     , mmorph
     , monad-control            >= 0.3.1        && < 0.4
     , mono-traversable
@@ -52,7 +48,6 @@ Library
     , transformers             >= 0.2.2        && < 0.5
     , transformers-base        >= 0.4.1        && < 0.5
     , vector
-    -- , void                     >= 0.5.5
 
 benchmark bench
   hs-source-dirs: .

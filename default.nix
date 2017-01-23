@@ -1,36 +1,20 @@
-{ cabal, exceptions, hspec, liftedBase, mmorph, monadControl, mtl
-, QuickCheck, transformers, transformersBase, void, criterion
-, either, bifunctors, chunkedData, monoTraversable, text, foldl
-, CCdelcont, machines
-
-, primitive, streamingCommons, vector, filepath, mwcRandom
-, liftedAsync, stm, semigroups, contravariant, free
-
-, conduit, conduitExtra, conduitCombinators
+{ mkDerivation, base, bifunctors, bytestring, chunked-data
+, containers, either, exceptions, filepath, free, lifted-async
+, lifted-base, mmorph, monad-control, mono-traversable, mtl
+, mwc-random, primitive, semigroups, stdenv, stm, streaming-commons
+, text, transformers, transformers-base, vector
 }:
-
-cabal.mkDerivation (self: {
+mkDerivation {
   pname = "simple-conduit";
-  version = "0.5.0";
-  src = builtins.filterSource (path: type: type != "unknown") ./.;
-  buildDepends = [
-    exceptions liftedBase mmorph monadControl mtl transformers
-    transformersBase void either bifunctors chunkedData monoTraversable
-    primitive streamingCommons vector filepath mwcRandom liftedAsync
-    foldl stm contravariant free
+  version = "0.5.1";
+  src = ./.;
+  libraryHaskellDepends = [
+    base bifunctors bytestring chunked-data containers either
+    exceptions filepath free lifted-async lifted-base mmorph
+    monad-control mono-traversable mtl mwc-random primitive semigroups
+    stm streaming-commons text transformers transformers-base vector
   ];
-  testDepends = [
-    hspec mtl QuickCheck transformers void text criterion
-    # jww (2014-06-06): Remove these once things get stable
-    conduit conduitExtra conduitCombinators CCdelcont
-  ];
-  doCheck = true;
-  configureFlags = "--enable-benchmarks";
-  meta = {
-    homepage = "http://github.com/jwiegley/simple-conduit";
-    description = "A simplified version of the conduit library";
-    license = self.stdenv.lib.licenses.bsd3;
-    platforms = self.ghc.meta.platforms;
-    maintainers = [ self.stdenv.lib.maintainers.jwiegley ];
-  };
-})
+  homepage = "http://github.com/jwiegley/simple-conduit";
+  description = "A simple streaming I/O library based on monadic folds";
+  license = stdenv.lib.licenses.bsd3;
+}

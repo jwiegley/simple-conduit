@@ -172,20 +172,16 @@ import           Data.Builder (Builder(builderToLazy), ToBuilder(..))
 import           Data.ByteString (ByteString)
 import           Data.IOData (IOData(hGetChunk, hPut))
 import           Data.List (unfoldr)
-import           Data.MonoTraversable (MonoTraversable, MonoFunctor, Element,
-                                       MonoFoldable(oall, oany, ofoldMap,
-                                                    ofoldl', ofoldlM, olength,
-                                                    onull))
+import           Data.MonoTraversable
 import           Data.NonNull as NonNull (NonNull, fromNullable)
 import           Data.Semigroup (Any(..), All(..), Monoid(..), Semigroup((<>)))
-import           Data.Sequences as Seq (OrdSequence, EqSequence(elem, notElem),
-                                        SemiSequence(..), singleton,
+import           Data.Sequences as Seq (SemiSequence(..), singleton,
                                         IsSequence(break, drop, dropWhile,
                                                    fromList, splitAt))
-import           Data.Sequences.Lazy (LazySequence(fromChunks, toChunks))
+import           Data.Sequences (LazySequence(fromChunks, toChunks))
 import qualified Data.Streaming.Filesystem as F
 import           Data.Text (Text)
-import           Data.Textual.Encoding (Utf8(encodeUtf8))
+import           Data.Text.Encoding (encodeUtf8)
 import           Data.Traversable (Traversable)
 import qualified Data.Vector.Generic as V
 import qualified Data.Vector.Generic.Mutable as VM
@@ -249,7 +245,7 @@ replicateMC n m = source $ go n
         loop n' r | n' > 0 = loop (n' - 1) =<< yield r =<< lift m
         loop _ r = return r
 
-sourceHandle :: forall m a. (MonadIO m, IOData a) => Handle -> Source m a
+sourceHandle :: forall m a. (MonadIO m, MonoFoldable a, IOData a) => Handle -> Source m a
 sourceHandle h = source go
   where
     go :: r -> (r -> a -> EitherT r m r) -> EitherT r m r
@@ -260,25 +256,25 @@ sourceHandle h = source go
             if onull x
                 then return y
                 else loop =<< yield y x
-{-# SPECIALIZE sourceHandle :: IOData a => Handle -> Source IO a #-}
+{-# SPECIALIZE sourceHandle :: (MonoFoldable a, IOData a) => Handle -> Source IO a #-}
 
-sourceFile :: (MonadBaseControl IO m, MonadIO m, IOData a)
+sourceFile :: (MonadBaseControl IO m, MonadIO m, MonoFoldable a, IOData a)
            => FilePath -> Source m a
 sourceFile path = source $ \z yield ->
     liftBaseOp (bracket (openFile path ReadMode) hClose)
         (\h -> runSource (sourceHandle h) z yield)
-{-# SPECIALIZE sourceFile :: IOData a => FilePath -> Source IO a #-}
+{-# SPECIALIZE sourceFile :: (MonoFoldable a, IOData a) => FilePath -> Source IO a #-}
 
-sourceIOHandle :: (MonadBaseControl IO m, MonadIO m, IOData a)
+sourceIOHandle :: (MonadBaseControl IO m, MonadIO m, MonoFoldable a, IOData a)
                => IO Handle -> Source m a
 sourceIOHandle f = source $ \z yield ->
     liftBaseOp (bracket f hClose) $ \h ->
         runSource (sourceHandle h) z yield
-{-# SPECIALIZE sourceIOHandle :: IOData a => IO Handle -> Source IO a #-}
+{-# SPECIALIZE sourceIOHandle :: (MonoFoldable a, IOData a) => IO Handle -> Source IO a #-}
 
-stdinC :: (MonadBaseControl IO m, MonadIO m, IOData a) => Source m a
+stdinC :: (MonadBaseControl IO m, MonadIO m, MonoFoldable a, IOData a) => Source m a
 stdinC = sourceHandle stdin
-{-# SPECIALIZE stdinC :: IOData a => Source IO a #-}
+{-# SPECIALIZE stdinC :: (MonoFoldable a, IOData a) => Source IO a #-}
 
 initRepeat :: Monad m => m seed -> (seed -> m a) -> Source m a
 initRepeat mseed f = source $ \z yield ->
@@ -426,14 +422,14 @@ orCE = anyCE id
 elemC :: (Monad m, Eq a) => a -> Sink a m Bool
 elemC x = anyC (== x)
 
-elemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
-elemCE = anyC . Seq.elem
+elemCE :: (Monad m, MonoFoldable seq, Eq (Element seq)) => Element seq -> Sink seq m Bool
+elemCE = anyC . oelem
 
 notElemC :: (Monad m, Eq a) => a -> Sink a m Bool
 notElemC x = allC (/= x)
 
-notElemCE :: (Monad m, EqSequence seq) => Element seq -> Sink seq m Bool
-notElemCE = allC . Seq.notElem
+notElemCE :: (Monad m, MonoFoldable seq, Eq (Element seq)) => Element seq -> Sink seq m Bool
+notElemCE = allC . onotElem
 
 produceList :: Monad m => ([a] -> b) -> Sink a m b
 produceList f =
@@ -497,13 +493,13 @@ lengthIfCE f = foldlCE (\cnt a -> if f a then cnt + 1 else cnt) 0
 maximumC :: (Monad m, Ord a) => Sink a m (Maybe a)
 maximumC = sink Nothing $ \r y -> return $ Just $ maybe y (max y) r
 
-maximumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
+maximumCE :: (Monad m, MonoFoldable seq) => Sink seq m (Maybe (Element seq))
 maximumCE = undefined
 
 minimumC :: (Monad m, Ord a) => Sink a m (Maybe a)
 minimumC = sink Nothing $ \r y -> return $ Just $ maybe y (min y) r
 
-minimumCE :: (Monad m, OrdSequence seq) => Sink seq m (Maybe (Element seq))
+minimumCE :: (Monad m, MonoFoldable seq) => Sink seq m (Maybe (Element seq))
 minimumCE = undefined
 
 -- jww (2014-06-07): These two cannot be implemented without leftover support.
@@ -732,7 +728,7 @@ concatMapAccumMC :: Monad m
                  => (a -> accum -> m (accum, [b])) -> accum -> Conduit a m b
 concatMapAccumMC = undefined
 
-encodeUtf8C :: (Monad m, Utf8 text binary) => Conduit text m binary
+encodeUtf8C :: Monad m => Conduit Text m ByteString
 encodeUtf8C = mapC encodeUtf8
 
 decodeUtf8C :: MonadThrow m => Conduit ByteString m Text
@@ -754,7 +750,7 @@ unlinesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
               => Conduit seq m seq
 unlinesAsciiC = concatMapC (: [Seq.singleton 10])
 
-linesUnboundedC_ :: forall m seq. (Monad m, IsSequence seq, Eq (Element seq))
+linesUnboundedC_ :: forall m seq. (Monad m, IsSequence seq, Eq (Element seq), Semigroup seq)
                  => Element seq -> Conduit seq m seq
 linesUnboundedC_ sep src = source $ \z yield -> EitherT $ do
     eres <- runEitherT $ runSource src (z, n) (go yield)
@@ -778,19 +774,19 @@ linesUnboundedC_ sep src = source $ \z yield -> EitherT $ do
           where
             (x, y) = Seq.break (== sep) t
 
-linesUnboundedC :: (Monad m, IsSequence seq, Element seq ~ Char)
+linesUnboundedC :: (Monad m, IsSequence seq, Element seq ~ Char, Semigroup seq)
                 => Conduit seq m seq
 linesUnboundedC = linesUnboundedC_ '\n'
 
-linesUnboundedAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
+linesUnboundedAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8, Semigroup seq)
                      => Conduit seq m seq
 linesUnboundedAsciiC = linesUnboundedC_ 10
 
-linesC :: (Monad m, IsSequence seq, Element seq ~ Char)
+linesC :: (Monad m, IsSequence seq, Element seq ~ Char, Semigroup seq)
                 => Conduit seq m seq
 linesC = linesUnboundedC
 
-linesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8)
+linesAsciiC :: (Monad m, IsSequence seq, Element seq ~ Word8, Semigroup seq)
                      => Conduit seq m seq
 linesAsciiC = linesUnboundedAsciiC
 
